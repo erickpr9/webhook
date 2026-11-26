@@ -238,6 +238,26 @@ Com a loja ([`cliente-webhook`](https://github.com/erickpr9/cliente-webhook)) ro
 
 Os cenários de falha da loja (fora do ar, lenta e recusando) estão no [README do cliente-webhook](https://github.com/erickpr9/cliente-webhook#roteiro-no-postman).
 
+### 11. Teste em massa
+
+A pasta **6. Carga (dev)** cria muitos pedidos e confirma o pagamento de todos de uma vez, com um único clique. Ajuste `loadCount` (quantidade, padrão 100) e `loadConcurrency` (requests em paralelo, padrão 10) nas variáveis da collection.
+
+| # | Request | Esperado |
+|---|---|---|
+| 1 | **6. Carga › Disparar carga (N pedidos + pagamentos)** | testes verdes: todos os pedidos criados e todos os webhooks aceitos (`202`), com o tempo e a vazão no Console do Postman |
+| 2 | **6. Carga › Acompanhar carga** (repita a cada ~5s) | contagem por status: eventos `RECEIVED` → `PROCESSED` e notificações `PENDING` → `SENT` |
+| 3 | **6. Carga › Acompanhar carga** | os dois testes passam quando tudo foi processado e entregue à loja |
+
+O que observar: **aceitar é muito mais rápido que processar**. Numa medição local com 500 pedidos e 50 em paralelo, os 500 webhooks foram aceitos em menos de 1 segundo. O processamento levou cerca de 50 segundos, e a entrega à loja terminou em pouco mais de 1 minuto. Essa diferença é a fila (a inbox) absorvendo o pico, sem perder nada e sem derrubar a aplicação.
+
+A vazão do processamento é definida pelo worker: `batch-size` eventos a cada `interval` (20 a cada 2s, ou seja, 10 por segundo). Para ver o efeito, suba a aplicação com outros valores e repita a carga:
+
+```powershell
+$env:SPRING_PROFILES_ACTIVE="local"; .\gradlew.bat bootRun --args="--webhook.worker.events.batch-size=100 --webhook.worker.events.interval=500ms"
+```
+
+Também vale subir duas instâncias da aplicação (a segunda com `--server.port=8082`) e ver as duas dividindo o trabalho sem processar o mesmo evento duas vezes: é o `FOR UPDATE SKIP LOCKED` em ação. O acompanhamento olha os 500 eventos e notificações mais recentes, então para cargas maiores use as métricas.
+
 Pedidos de exemplo já carregados no banco: `ord_1042`/`pay_001` (PIX), `ord_1043`/`pay_002` (cartão de crédito), `ord_1044`/`pay_003` (boleto). Também dá para usar o Swagger em http://localhost:8080/swagger-ui.html.
 
 ## Endpoints

@@ -11,7 +11,11 @@
     { "key": "paymentId", "value": "pay_001", "description": "Pagamento alvo dos webhooks." },
     { "key": "amount", "value": "15990", "description": "Valor em centavos enviado nos webhooks." },
     { "key": "currency", "value": "BRL", "description": "Moeda enviada nos webhooks." },
-    { "key": "webhookEventId", "value": "", "description": "Id interno de um evento da inbox, preenchido pelos requests de listagem do Admin." }
+    { "key": "webhookEventId", "value": "", "description": "Id interno de um evento da inbox, preenchido pelos requests de listagem do Admin." },
+    { "key": "loadCount", "value": "100", "description": "Quantidade de pedidos (e webhooks) da carga." },
+    { "key": "loadConcurrency", "value": "10", "description": "Requests em paralelo durante a carga." },
+    { "key": "loadRunId", "value": "", "description": "Id da última carga, preenchido por Disparar carga." },
+    { "key": "loadOrderIds", "value": "", "description": "Pedidos da última carga, preenchido por Disparar carga." }
   ],
   "item": [
     {
@@ -554,6 +558,205 @@
             "method": "GET",
             "header": [],
             "url": { "raw": "{{baseUrl}}/actuator/prometheus", "host": ["{{baseUrl}}"], "path": ["actuator", "prometheus"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Carga (dev)",
+      "description": "Teste em massa do processamento.\n\n1. **Disparar carga** cria `loadCount` pedidos e envia um webhook de pagamento confirmado para cada um, com até `loadConcurrency` requests em paralelo.\n2. Repita **Acompanhar carga** até todos os eventos estarem `PROCESSED` e todas as notificações `SENT`.\n\nOs webhooks são aceitos na hora (`202`). O processamento acontece depois, no ritmo dos workers, e é isso que você observa aqui. Ajuste `loadCount` e `loadConcurrency` nas variáveis da collection; comece com 100. O acompanhamento olha os 500 eventos e notificações mais recentes.",
+      "item": [
+        {
+          "name": "Disparar carga (N pedidos + pagamentos)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Dispara a carga: cria N pedidos e envia um webhook assinado de pagamento confirmado para cada um.",
+                  "// Roda tudo aqui com pm.sendRequest, com no máximo loadConcurrency requests em paralelo.",
+                  "// O Postman só envia o request principal depois que todos os callbacks terminam.",
+                  "const baseUrl = pm.variables.get('baseUrl');",
+                  "const secret = pm.variables.get('webhookSecret');",
+                  "const total = Math.max(1, parseInt(pm.variables.get('loadCount'), 10) || 100);",
+                  "const concurrency = Math.max(1, parseInt(pm.variables.get('loadConcurrency'), 10) || 10);",
+                  "const runId = Date.now().toString(36);",
+                  "const startedAt = Date.now();",
+                  "",
+                  "const stats = { created: 0, accepted: 0, failures: [] };",
+                  "const orderIds = [];",
+                  "let next = 0;",
+                  "let finished = 0;",
+                  "",
+                  "function fail(i, step, err, res) {",
+                  "    stats.failures.push('#' + i + ' ' + step + ': ' + (err ? err.message : res.code + ' ' + res.text()));",
+                  "}",
+                  "",
+                  "// Mesmo contrato do provedor: HMAC-SHA256 de \"{timestamp}.{body}\".",
+                  "function signedConfirmation(i, order) {",
+                  "    const eventId = 'evt_load_' + runId + '_' + i;",
+                  "    const body = JSON.stringify({",
+                  "        id: eventId,",
+                  "        type: 'payment.confirmed',",
+                  "        created_at: new Date().toISOString(),",
+                  "        data: { payment_id: order.paymentId, order_id: order.orderId, amount: order.amount, currency: 'BRL' }",
+                  "    });",
+                  "    const timestamp = Math.floor(Date.now() / 1000).toString();",
+                  "    const signature = CryptoJS.HmacSHA256(timestamp + '.' + body, secret).toString(CryptoJS.enc.Hex);",
+                  "    return {",
+                  "        url: baseUrl + '/v1/webhooks/payments',",
+                  "        method: 'POST',",
+                  "        header: [",
+                  "            { key: 'Content-Type', value: 'application/json' },",
+                  "            { key: 'X-Event-Id', value: eventId },",
+                  "            { key: 'X-Timestamp', value: timestamp },",
+                  "            { key: 'X-Signature', value: 'sha256=' + signature }",
+                  "        ],",
+                  "        body: { mode: 'raw', raw: body }",
+                  "    };",
+                  "}",
+                  "",
+                  "function done() {",
+                  "    finished++;",
+                  "    if (next < total) {",
+                  "        runOne(next++);",
+                  "    }",
+                  "    if (finished === total) {",
+                  "        pm.collectionVariables.set('loadRunId', runId);",
+                  "        pm.collectionVariables.set('loadOrderIds', JSON.stringify(orderIds));",
+                  "        pm.variables.set('loadSummary', JSON.stringify({ total, concurrency, runId, elapsedMs: Date.now() - startedAt, stats }));",
+                  "    }",
+                  "}",
+                  "",
+                  "function runOne(i) {",
+                  "    const amount = 1000 + (i % 50) * 100;",
+                  "    pm.sendRequest({",
+                  "        url: baseUrl + '/dev/orders',",
+                  "        method: 'POST',",
+                  "        header: [{ key: 'Content-Type', value: 'application/json' }],",
+                  "        body: { mode: 'raw', raw: JSON.stringify({ amountInCents: amount, currency: 'BRL', method: 'PIX' }) }",
+                  "    }, (err, res) => {",
+                  "        if (err || res.code !== 201) {",
+                  "            fail(i, 'criar pedido', err, res);",
+                  "            return done();",
+                  "        }",
+                  "        stats.created++;",
+                  "        const order = Object.assign(res.json(), { amount });",
+                  "        orderIds.push(order.orderId);",
+                  "        pm.sendRequest(signedConfirmation(i, order), (err2, res2) => {",
+                  "            if (err2 || res2.code !== 202) {",
+                  "                fail(i, 'confirmar pagamento', err2, res2);",
+                  "            } else {",
+                  "                stats.accepted++;",
+                  "            }",
+                  "            done();",
+                  "        });",
+                  "    });",
+                  "}",
+                  "",
+                  "for (; next < Math.min(concurrency, total); next++) {",
+                  "    runOne(next);",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const summary = JSON.parse(pm.variables.get('loadSummary'));",
+                  "const s = summary.stats;",
+                  "const seconds = summary.elapsedMs / 1000;",
+                  "",
+                  "console.log('Carga ' + summary.runId + ': ' + s.created + ' pedidos criados e ' + s.accepted + ' webhooks aceitos de '",
+                  "    + summary.total + ' em ' + seconds.toFixed(1) + 's (' + (s.accepted / seconds).toFixed(1) + ' webhooks/s, '",
+                  "    + summary.concurrency + ' em paralelo).');",
+                  "s.failures.slice(0, 20).forEach(f => console.warn(f));",
+                  "",
+                  "pm.test('Aplicação de pé depois da carga', () => pm.response.to.have.status(200));",
+                  "pm.test('Pedidos criados: ' + s.created + ' de ' + summary.total, () => pm.expect(s.created).to.eql(summary.total));",
+                  "pm.test('Webhooks aceitos (202): ' + s.accepted + ' de ' + summary.total, () => pm.expect(s.accepted).to.eql(summary.total));",
+                  "pm.test('Tempo para aceitar tudo: ' + seconds.toFixed(1) + 's', () => true);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "description": "A carga inteira roda no pre-request script. O request principal só confere que a aplicação continua de pé. O resumo (tempo, vazão e falhas) aparece nos testes e no Console do Postman.",
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "actuator",
+                "health"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Acompanhar carga",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Conta por status os eventos desta carga e, em seguida, as notificações enviadas à loja.",
+                  "const runId = pm.collectionVariables.get('loadRunId');",
+                  "const orderIds = new Set(JSON.parse(pm.collectionVariables.get('loadOrderIds') || '[]'));",
+                  "const prefix = 'evt_load_' + runId + '_';",
+                  "",
+                  "function countBy(items) {",
+                  "    return items.reduce((acc, item) => { acc[item.status] = (acc[item.status] || 0) + 1; return acc; }, {});",
+                  "}",
+                  "",
+                  "pm.test('Listagem de eventos (200)', () => pm.response.to.have.status(200));",
+                  "const events = pm.response.json().filter(e => e.providerEventId.startsWith(prefix));",
+                  "const eventsByStatus = countBy(events);",
+                  "console.log('Eventos da carga ' + runId + ': ' + JSON.stringify(eventsByStatus));",
+                  "",
+                  "pm.sendRequest(pm.variables.get('baseUrl') + '/admin/notifications?limit=500', (err, res) => {",
+                  "    const notifications = err ? [] : res.json().filter(n => orderIds.has(n.orderId));",
+                  "    const notificationsByStatus = countBy(notifications);",
+                  "    console.log('Notificações da carga ' + runId + ': ' + JSON.stringify(notificationsByStatus));",
+                  "",
+                  "    const processed = eventsByStatus.PROCESSED || 0;",
+                  "    const sent = notificationsByStatus.SENT || 0;",
+                  "    pm.test('Eventos processados: ' + processed + ' de ' + orderIds.size + ' ' + JSON.stringify(eventsByStatus),",
+                  "        () => pm.expect(processed).to.eql(orderIds.size));",
+                  "    pm.test('Notificações entregues à loja: ' + sent + ' de ' + orderIds.size + ' ' + JSON.stringify(notificationsByStatus),",
+                  "        () => pm.expect(sent).to.eql(orderIds.size));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "description": "Conta por status os eventos e as notificações da última carga. Repita até os dois testes passarem e acompanhe os logs da plataforma e da loja enquanto isso.",
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/webhook-events?limit=500",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "webhook-events"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "500"
+                }
+              ]
+            }
           }
         }
       ]
