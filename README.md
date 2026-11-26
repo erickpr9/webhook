@@ -8,7 +8,7 @@ Provedor ──POST assinado──▶ API ──▶ inbox (Postgres) ──▶ w
                        202 Accepted                   outbox ──POST assinado──▶ Loja (cliente-webhook)
 ```
 
-Este sistema faz os dois papéis do webhook: **recebe** o aviso do provedor e **envia** o próprio aviso à loja (webhook de saída). A loja é o projeto [`cliente-webhook`](../cliente-webhook), na pasta ao lado.
+Este sistema faz os dois papéis do webhook: **recebe** o aviso do provedor e **envia** o próprio aviso à loja (webhook de saída). A loja é o projeto [`cliente-webhook`](https://github.com/erickpr9/cliente-webhook), em outro repositório.
 
 ## O que a esteira garante
 
@@ -228,7 +228,7 @@ Envie **5. Observabilidade › Métricas** e procure por `webhook_received_total
 
 ### 10. O aviso chegando na loja
 
-Com a loja ([`cliente-webhook`](../cliente-webhook)) rodando, cada pagamento confirmado gera um webhook de saída. Acompanhe pelos dois lados:
+Com a loja ([`cliente-webhook`](https://github.com/erickpr9/cliente-webhook)) rodando, cada pagamento confirmado gera um webhook de saída. Acompanhe pelos dois lados:
 
 | # | Collection | Request | Esperado |
 |---|---|---|---|
@@ -236,7 +236,7 @@ Com a loja ([`cliente-webhook`](../cliente-webhook)) rodando, cada pagamento con
 | 2 | Loja | **1. Loja › Avisos recebidos** | aviso `APPLIED` |
 | 3 | Loja | **1. Loja › Consultar pedido** | `READY_TO_SHIP` |
 
-Os cenários de falha da loja (fora do ar, lenta e recusando) estão no [README do cliente-webhook](../cliente-webhook/README.md#roteiro-no-postman).
+Os cenários de falha da loja (fora do ar, lenta e recusando) estão no [README do cliente-webhook](https://github.com/erickpr9/cliente-webhook#roteiro-no-postman).
 
 Pedidos de exemplo já carregados no banco: `ord_1042`/`pay_001` (PIX), `ord_1043`/`pay_002` (cartão de crédito), `ord_1044`/`pay_003` (boleto). Também dá para usar o Swagger em http://localhost:8080/swagger-ui.html.
 
