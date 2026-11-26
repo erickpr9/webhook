@@ -144,7 +144,7 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "// Primeira vez: 202 (received). A partir da segunda: 200 (duplicate).",
+                  "// A recepção sempre responde 202: a deduplicação acontece no consumo (veja o log e o Admin).",
                   "pm.test('Aceito ou reconhecido como duplicado', () => pm.expect(pm.response.code).to.be.oneOf([200, 202]));",
                   "if (pm.response.code === 200) {",
                   "    pm.test('Marcado como duplicado', () => pm.expect(pm.response.json().status).to.eql('duplicate'));",
@@ -154,7 +154,7 @@
             }
           ],
           "request": {
-            "description": "O header `X-Event-Id` é fixo (`evt_redelivery_demo`). Envie duas vezes: a primeira responde 202 e a segunda 200 `duplicate`, sem processar de novo.",
+            "description": "O header `X-Event-Id` é fixo (`evt_redelivery_demo`). Envie duas vezes: as duas respondem 202, porque a recepção só publica no Kafka. A cópia é descartada no consumo: no Admin aparece um único evento, e o log mostra `Mensagem repetida`.",
             "method": "POST",
             "header": [
               { "key": "Content-Type", "value": "application/json" },
@@ -210,7 +210,7 @@
             }
           ],
           "request": {
-            "description": "Aponta para `pay_999`, que não existe. O evento entra em RETRY_SCHEDULED com backoff e, após 6 tentativas, vai para DEAD. Acompanhe em **3. Admin**.",
+            "description": "Aponta para `pay_999`, que não existe. A mensagem passa pelos tópicos de retry (`payment-webhooks-retry-*`) e, após 6 tentativas, vai para `payment-webhooks-dlt` e o evento fica DEAD. Acompanhe em **3. Admin** e no Kafka UI.",
             "method": "POST",
             "header": [
               { "key": "Content-Type", "value": "application/json" },
@@ -238,7 +238,7 @@
             }
           ],
           "request": {
-            "description": "Valor de 1 centavo, diferente do pagamento. É uma violação de regra de negócio: vai para DEAD na primeira tentativa, sem alterar o pedido.",
+            "description": "Valor de 1 centavo, diferente do pagamento. É uma violação de regra de negócio: vai direto para `payment-webhooks-dlt` (DEAD na primeira tentativa), sem alterar o pedido.",
             "method": "POST",
             "header": [
               { "key": "Content-Type", "value": "application/json" },
@@ -438,7 +438,7 @@
             }
           ],
           "request": {
-            "description": "Recoloca na fila um evento DEAD, com as tentativas zeradas. Use depois de corrigir a causa (ex.: criar o pagamento que faltava).",
+            "description": "Recoloca na esteira um evento DEAD: zera as tentativas e publica de novo o payload guardado no tópico `payment-webhooks`. Use depois de corrigir a causa (ex.: criar o pagamento que faltava).",
             "method": "POST",
             "header": [],
             "url": { "raw": "{{baseUrl}}/admin/webhook-events/{{webhookEventId}}/reprocess", "host": ["{{baseUrl}}"], "path": ["admin", "webhook-events", "{{webhookEventId}}", "reprocess"] }
@@ -564,7 +564,7 @@
     },
     {
       "name": "6. Carga (dev)",
-      "description": "Teste em massa do processamento.\n\n1. **Disparar carga** cria `loadCount` pedidos e envia um webhook de pagamento confirmado para cada um, com até `loadConcurrency` requests em paralelo.\n2. Repita **Acompanhar carga** até todos os eventos estarem `PROCESSED` e todas as notificações `SENT`.\n\nOs webhooks são aceitos na hora (`202`). O processamento acontece depois, no ritmo dos workers, e é isso que você observa aqui. Ajuste `loadCount` e `loadConcurrency` nas variáveis da collection; comece com 100. O acompanhamento olha os 500 eventos e notificações mais recentes.",
+      "description": "Teste em massa do processamento.\n\n1. **Disparar carga** cria `loadCount` pedidos e envia um webhook de pagamento confirmado para cada um, com até `loadConcurrency` requests em paralelo.\n2. Repita **Acompanhar carga** até todos os eventos estarem `PROCESSED` e todas as notificações `SENT`.\n\nOs webhooks são aceitos na hora (`202`) e ficam no tópico `payment-webhooks`. Os consumers processam no ritmo deles, e um evento só aparece no Admin quando é consumido: o que ainda falta é o lag do consumer group, visível no Kafka UI. Ajuste `loadCount` e `loadConcurrency` nas variáveis da collection; comece com 100. O acompanhamento olha os 500 eventos e notificações mais recentes.",
       "item": [
         {
           "name": "Disparar carga (N pedidos + pagamentos)",

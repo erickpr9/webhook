@@ -163,3 +163,18 @@ Trocar o `NotificationRelayJob` pelo Debezium lendo o WAL do Postgres. Ele publi
 ## 7. Ordem de entrega
 
 Primeiro a infraestrutura e as dependências (seções 2 e 3), depois as etapas 1 a 8, uma por vez, com testes verdes ao final de cada uma. Cada etapa vira um commit na branch `feature/kafka`.
+
+## 8. O que mudou em relação ao plano
+
+Registro do que foi diferente na implementação, e por quê.
+
+| Ponto | Plano | Implementado | Motivo |
+|---|---|---|---|
+| Atrasos dos retry topics | Os mesmos de antes (10s, 30s, 2m, 10m, 1h) | Exponencial: 10s, 30s, 90s, 270s, 810s (`delay-ms`, `multiplier`, `max-delay-ms`) | O `@RetryableTopic` trabalha com backoff fixo ou exponencial, não com uma lista arbitrária. A `RetryPolicy` do domínio ganhou `RetryPolicy.exponential`, alimentada pelas mesmas propriedades, para o banco e o broker concordarem |
+| Status do evento | Claim com `UPDATE ... SET status = 'PROCESSING'` | Sem `PROCESSING`: insert, `SELECT ... FOR UPDATE` e processamento na mesma transação | Com o claim em transação separada, uma queda logo depois deixaria o evento preso em `PROCESSING`, e a reentrega o pularia. Com o lock da linha, uma queda desfaz tudo e a reentrega processa normalmente |
+| Visibilidade no Admin | Igual à versão anterior | Um evento só aparece no Admin depois de consumido | O que ainda não foi consumido está no tópico: é o lag do consumer group, visível no Kafka UI |
+| Saúde do Kafka | `/actuator/health` mostrando o Kafka | `KafkaHealthIndicator` próprio (`describeCluster` com timeout de 3s) | O Spring Boot não traz health indicator para o Kafka |
+| Dead-letter | DLT ao fim das tentativas | DLT + `@DltHandler` que marca `DEAD` no banco se ainda não estiver | Cobre o caso em que o banco estava fora quando a última tentativa falhou |
+| Mensagens fora do formato | Não previsto | `MalformedMessageException` vai direto para a DLT | Mensagem sem os headers esperados nunca vai dar certo |
+| Logs do Spring Kafka | Não previsto | `DeadLetterPublishingRecovererFactory` desligado e `org.apache.kafka` em WARN | O caso de uso já registra o motivo de cada dead-letter, e o cliente do Kafka registra toda a configuração em INFO |
+| CDC com Debezium (etapa 9) | Opcional | Não implementado | Fica como próximo passo |
