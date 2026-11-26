@@ -4,11 +4,13 @@ import com.estudos.webhook.api.filter.PayloadTooLargeException;
 import com.estudos.webhook.api.request.InvalidWebhookRequestException;
 import com.estudos.webhook.api.response.ErrorResponse;
 import com.estudos.webhook.api.security.InvalidSignatureException;
+import com.estudos.webhook.application.exception.EventPublishingException;
 import com.estudos.webhook.domain.exception.BusinessException;
 import com.estudos.webhook.domain.exception.ResourceNotFoundException;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -103,6 +105,16 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(BusinessException.class)
     ResponseEntity<ErrorResponse> handleBusiness(BusinessException ex, HttpServletRequest request) {
         return warn(HttpStatus.UNPROCESSABLE_ENTITY, ex.getMessage(), List.of(), request);
+    }
+
+    @ExceptionHandler(EventPublishingException.class)
+    ResponseEntity<ErrorResponse> handlePipelineUnavailable(EventPublishingException ex, HttpServletRequest request) {
+        // O caso de uso já registrou o motivo em ERROR. O Retry-After orienta o reenvio do provedor.
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .header(HttpHeaders.RETRY_AFTER, "30")
+                .body(ErrorResponse.of(clock, HttpStatus.SERVICE_UNAVAILABLE,
+                        "Webhook pipeline is temporarily unavailable. Retry later.", request.getRequestURI(),
+                        List.of()));
     }
 
     @ExceptionHandler(Exception.class)

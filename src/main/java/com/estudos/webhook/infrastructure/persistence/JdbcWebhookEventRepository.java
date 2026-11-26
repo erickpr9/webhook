@@ -17,12 +17,11 @@ import static com.estudos.webhook.infrastructure.persistence.JdbcTimestamps.from
 import static com.estudos.webhook.infrastructure.persistence.JdbcTimestamps.toDb;
 
 /**
- * Inbox de webhooks em PostgreSQL.
+ * Registro de processamento dos webhooks em PostgreSQL.
  *
- * <p>A reserva de eventos usa {@code FOR UPDATE SKIP LOCKED} em uma única instrução
- * {@code UPDATE ... RETURNING}: a reserva é atômica, não segura locks durante o processamento
- * e permite vários workers em paralelo. Um lease ({@code locked_until}) permite retomar eventos
- * de um worker que morreu no meio do processamento.
+ * <p>A idempotência usa a restrição única {@code (provider, provider_event_id)} com
+ * {@code ON CONFLICT DO NOTHING}, e o bloqueio da linha ({@code SELECT ... FOR UPDATE}) faz duas
+ * cópias da mesma mensagem esperarem uma pela outra, dentro da transação do consumer.
  */
 @Repository
 public class JdbcWebhookEventRepository implements WebhookEventRepository {
@@ -35,54 +34,36 @@ public class JdbcWebhookEventRepository implements WebhookEventRepository {
             ON CONFLICT (provider, provider_event_id) DO NOTHING
             """;
 
-    private static final String CLAIM_DUE = """
-            UPDATE webhook_events
-               SET status = 'PROCESSING',
-                   attempts = attempts + 1,
-                   locked_until = :leaseUntil
-             WHERE id IN (
-                   SELECT id
-                     FROM webhook_events
-                    WHERE (status IN ('RECEIVED', 'RETRY_SCHEDULED') AND next_attempt_at <= :now)
-                       OR (status = 'PROCESSING' AND locked_until < :now)
-                    ORDER BY received_at
-                    LIMIT :batchSize
-                      FOR UPDATE SKIP LOCKED)
-            RETURNING *
-            """;
-
-    private static final String DEAD_LETTER_ABANDONED = """
-            UPDATE webhook_events
-               SET status = 'DEAD',
-                   locked_until = NULL,
-                   last_error = 'Processing lease expired after the maximum number of attempts'
-             WHERE status = 'PROCESSING'
-               AND locked_until < :now
-               AND attempts >= :maxAttempts
+    private static final String LOCK_FOR_PROCESSING = """
+            SELECT *
+              FROM webhook_events
+             WHERE provider = :provider AND provider_event_id = :providerEventId
+               FOR UPDATE
             """;
 
     private static final String COMPLETE = """
             UPDATE webhook_events
-               SET status = :status, processed_at = :now, processing_note = :note, locked_until = NULL
-             WHERE id = :id AND status = 'PROCESSING' AND attempts = :attempt
+               SET status = :status, attempts = :attempts, processed_at = :now, processing_note = :note,
+                   last_error = NULL
+             WHERE id = :id
             """;
 
-    private static final String SCHEDULE_RETRY = """
+    private static final String RECORD_RETRY = """
             UPDATE webhook_events
-               SET status = 'RETRY_SCHEDULED', next_attempt_at = :nextAttemptAt, last_error = :error,
-                   locked_until = NULL
-             WHERE id = :id AND status = 'PROCESSING' AND attempts = :attempt
+               SET status = 'RETRY_SCHEDULED', attempts = :attempts, next_attempt_at = :nextAttemptAt,
+                   last_error = :error
+             WHERE id = :id
             """;
 
     private static final String MARK_DEAD = """
             UPDATE webhook_events
-               SET status = 'DEAD', last_error = :error, locked_until = NULL
-             WHERE id = :id AND status = 'PROCESSING' AND attempts = :attempt
+               SET status = 'DEAD', attempts = :attempts, last_error = :error
+             WHERE id = :id
             """;
 
     private static final String REQUEUE = """
             UPDATE webhook_events
-               SET status = 'RETRY_SCHEDULED', attempts = 0, next_attempt_at = :now, locked_until = NULL
+               SET status = 'RETRY_SCHEDULED', attempts = 0, next_attempt_at = :now
              WHERE id = :id AND status = 'DEAD'
             """;
 
@@ -131,45 +112,36 @@ public class JdbcWebhookEventRepository implements WebhookEventRepository {
     }
 
     @Override
-    public List<WebhookEvent> claimDue(Instant now, Instant leaseUntil, int batchSize) {
+    public Optional<WebhookEvent> lockForProcessing(String provider, String providerEventId) {
         var params = new MapSqlParameterSource()
-                .addValue("now", toDb(now))
-                .addValue("leaseUntil", toDb(leaseUntil))
-                .addValue("batchSize", batchSize);
-        return jdbc.query(CLAIM_DUE, params, ROW_MAPPER);
+                .addValue("provider", provider)
+                .addValue("providerEventId", providerEventId);
+        return jdbc.query(LOCK_FOR_PROCESSING, params, ROW_MAPPER).stream().findFirst();
     }
 
     @Override
-    public int deadLetterAbandoned(Instant now, int maxAttempts) {
-        var params = new MapSqlParameterSource()
-                .addValue("now", toDb(now))
-                .addValue("maxAttempts", maxAttempts);
-        return jdbc.update(DEAD_LETTER_ABANDONED, params);
-    }
-
-    @Override
-    public boolean complete(UUID id, int attempt, WebhookEventStatus finalStatus, Instant now, String note) {
+    public void complete(UUID id, int attempts, WebhookEventStatus finalStatus, Instant now, String note) {
         if (finalStatus != WebhookEventStatus.PROCESSED && finalStatus != WebhookEventStatus.IGNORED) {
             throw new IllegalArgumentException("Final status must be PROCESSED or IGNORED, got " + finalStatus);
         }
-        var params = fenced(id, attempt)
+        var params = withAttempts(id, attempts)
                 .addValue("status", finalStatus.name())
                 .addValue("now", toDb(now))
                 .addValue("note", truncate(note, 255));
-        return jdbc.update(COMPLETE, params) == 1;
+        jdbc.update(COMPLETE, params);
     }
 
     @Override
-    public boolean scheduleRetry(UUID id, int attempt, Instant nextAttemptAt, String error) {
-        var params = fenced(id, attempt)
+    public void recordRetry(UUID id, int attempts, Instant nextAttemptAt, String error) {
+        var params = withAttempts(id, attempts)
                 .addValue("nextAttemptAt", toDb(nextAttemptAt))
                 .addValue("error", error);
-        return jdbc.update(SCHEDULE_RETRY, params) == 1;
+        jdbc.update(RECORD_RETRY, params);
     }
 
     @Override
-    public boolean markDead(UUID id, int attempt, String error) {
-        return jdbc.update(MARK_DEAD, fenced(id, attempt).addValue("error", error)) == 1;
+    public void markDead(UUID id, int attempts, String error) {
+        jdbc.update(MARK_DEAD, withAttempts(id, attempts).addValue("error", error));
     }
 
     @Override
@@ -193,10 +165,10 @@ public class JdbcWebhookEventRepository implements WebhookEventRepository {
                 .orElseGet(() -> jdbc.query(FIND_RECENT, params, ROW_MAPPER));
     }
 
-    private static MapSqlParameterSource fenced(UUID id, int attempt) {
+    private static MapSqlParameterSource withAttempts(UUID id, int attempts) {
         return new MapSqlParameterSource()
                 .addValue("id", id)
-                .addValue("attempt", attempt);
+                .addValue("attempts", attempts);
     }
 
     private static String truncate(String value, int maxLength) {

@@ -1,6 +1,7 @@
 package com.estudos.webhook.support;
 
 import com.estudos.webhook.application.dto.PaymentEventData;
+import com.estudos.webhook.application.dto.ReceivedWebhookEvent;
 import com.estudos.webhook.domain.model.Money;
 import com.estudos.webhook.domain.model.Order;
 import com.estudos.webhook.domain.model.OrderStatus;
@@ -57,10 +58,16 @@ public final class TestData {
                 .formatted(eventId, type, createdAt, paymentId, orderId, amount);
     }
 
-    /** Evento reservado para processamento (status PROCESSING, tentativa {@code attempts}). */
-    public static WebhookEvent processingEvent(String type, int attempts) {
-        return new WebhookEvent(UUID.randomUUID(), "payment-gateway", "evt_" + UUID.randomUUID(), type,
-                payload("evt_x", type, NOW), WebhookEventStatus.PROCESSING, attempts, NOW, NOW, NOW,
+    /** Webhook como chega do tópico de eventos. */
+    public static ReceivedWebhookEvent message(String type) {
+        return new ReceivedWebhookEvent("payment-gateway", "evt_msg", type, NOW, NOW, ORDER_ID,
+                payload("evt_msg", type, NOW));
+    }
+
+    /** Registro de processamento da mensagem, no estado e com as tentativas informados. */
+    public static WebhookEvent stored(ReceivedWebhookEvent message, WebhookEventStatus status, int attempts) {
+        return new WebhookEvent(UUID.randomUUID(), message.provider(), message.providerEventId(), message.eventType(),
+                message.payload(), status, attempts, message.occurredAt(), message.receivedAt(), NOW,
                 null, null, null);
     }
 }

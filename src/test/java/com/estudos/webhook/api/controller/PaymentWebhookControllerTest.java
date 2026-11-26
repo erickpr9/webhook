@@ -2,7 +2,7 @@ package com.estudos.webhook.api.controller;
 
 import com.estudos.webhook.shared.security.HmacSigner;
 import com.estudos.webhook.application.dto.RegisterWebhookEventCommand;
-import com.estudos.webhook.application.dto.RegistrationResult;
+import com.estudos.webhook.application.exception.EventPublishingException;
 import com.estudos.webhook.application.usecase.RegisterWebhookEventUseCase;
 import com.estudos.webhook.support.TestData;
 import org.junit.jupiter.api.Test;
@@ -23,10 +23,12 @@ import java.time.Instant;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.hasItem;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -67,9 +69,7 @@ class PaymentWebhookControllerTest {
     }
 
     @Test
-    void acceptsNewEventAndRegistersItInTheInbox() throws Exception {
-        when(registerWebhookEvent.execute(any())).thenReturn(new RegistrationResult(EVENT_ID, false));
-
+    void acceptsEventAndPublishesItKeyedByOrder() throws Exception {
         send(signedRequest(EVENT_ID, validBody()))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.status").value("received"))
@@ -78,16 +78,29 @@ class PaymentWebhookControllerTest {
         ArgumentCaptor<RegisterWebhookEventCommand> command = ArgumentCaptor.forClass(RegisterWebhookEventCommand.class);
         verify(registerWebhookEvent).execute(command.capture());
         assertThat(command.getValue()).isEqualTo(new RegisterWebhookEventCommand("payment-gateway", EVENT_ID,
-                "payment.confirmed", CREATED_AT, validBody()));
+                "payment.confirmed", CREATED_AT, TestData.ORDER_ID, validBody()));
     }
 
     @Test
-    void answersOkForRedeliveredEvent() throws Exception {
-        when(registerWebhookEvent.execute(any())).thenReturn(new RegistrationResult(EVENT_ID, true));
+    void eventWithoutOrderIsKeyedByItsOwnId() throws Exception {
+        String body = "{\"id\":\"%s\",\"type\":\"customer.created\",\"created_at\":\"%s\"}"
+                .formatted(EVENT_ID, CREATED_AT);
+
+        send(signedRequest(EVENT_ID, body)).andExpect(status().isAccepted());
+
+        ArgumentCaptor<RegisterWebhookEventCommand> command = ArgumentCaptor.forClass(RegisterWebhookEventCommand.class);
+        verify(registerWebhookEvent).execute(command.capture());
+        assertThat(command.getValue().partitionKey()).isEqualTo(EVENT_ID);
+    }
+
+    @Test
+    void unavailablePipelineAnswers503SoTheProviderRetries() throws Exception {
+        doThrow(new EventPublishingException("broker down", null)).when(registerWebhookEvent).execute(any());
 
         send(signedRequest(EVENT_ID, validBody()))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("duplicate"));
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(header().string("Retry-After", "30"))
+                .andExpect(jsonPath("$.status").value(503));
     }
 
     @Test

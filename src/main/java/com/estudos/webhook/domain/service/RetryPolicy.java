@@ -1,6 +1,7 @@
 package com.estudos.webhook.domain.service;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
@@ -29,6 +30,29 @@ public final class RetryPolicy {
         }
         this.maxAttempts = maxAttempts;
         this.backoff = List.copyOf(backoff);
+    }
+
+    /**
+     * Backoff exponencial: {@code initialDelay}, {@code initialDelay × multiplier}, ... limitado a
+     * {@code maxDelay}. Gera um intervalo para cada retentativa ({@code maxAttempts - 1}).
+     *
+     * <p>É a mesma progressão usada pelos tópicos de retry do Kafka, para que o registro no banco
+     * mostre o horário real da próxima tentativa.
+     */
+    public static RetryPolicy exponential(int maxAttempts, Duration initialDelay, double multiplier,
+                                          Duration maxDelay) {
+        Objects.requireNonNull(initialDelay, "initialDelay must not be null");
+        Objects.requireNonNull(maxDelay, "maxDelay must not be null");
+        if (multiplier < 1) {
+            throw new IllegalArgumentException("multiplier must be at least 1");
+        }
+        List<Duration> backoff = new ArrayList<>();
+        double delayMillis = initialDelay.toMillis();
+        for (int retry = 0; retry < Math.max(1, maxAttempts - 1); retry++) {
+            backoff.add(Duration.ofMillis((long) Math.min(delayMillis, maxDelay.toMillis())));
+            delayMillis *= multiplier;
+        }
+        return new RetryPolicy(maxAttempts, backoff);
     }
 
     /** Indica se, após {@code attempts} tentativas, não deve haver outra. */

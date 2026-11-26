@@ -8,7 +8,7 @@ import com.estudos.webhook.domain.model.Payment;
 import com.estudos.webhook.domain.model.PaymentEventType;
 import com.estudos.webhook.domain.model.PaymentMethod;
 import com.estudos.webhook.domain.model.PaymentStatus;
-import com.estudos.webhook.support.PostgresIntegrationTest;
+import com.estudos.webhook.support.IntegrationTest;
 import com.estudos.webhook.support.TestData;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -20,7 +20,7 @@ import java.time.Instant;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-class JdbcOrderAndPaymentRepositoryIT extends PostgresIntegrationTest {
+class JdbcOrderAndPaymentRepositoryIT extends IntegrationTest {
 
     private static final Instant NOW = TestData.NOW;
 

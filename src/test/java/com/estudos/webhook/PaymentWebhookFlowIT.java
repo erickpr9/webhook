@@ -11,7 +11,7 @@ import com.estudos.webhook.domain.model.Money;
 import com.estudos.webhook.domain.model.Order;
 import com.estudos.webhook.domain.model.Payment;
 import com.estudos.webhook.domain.model.PaymentMethod;
-import com.estudos.webhook.support.PostgresIntegrationTest;
+import com.estudos.webhook.support.IntegrationTest;
 import com.estudos.webhook.support.TestData;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -44,27 +44,33 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 /**
- * Esteira completa, de ponta a ponta: HTTP assinado → inbox → worker → domínio → outbox →
- * notificação. Workers ligados com intervalos curtos e backoff reduzido.
+ * Esteira completa, de ponta a ponta, com Kafka e Postgres reais: HTTP assinado → tópico de
+ * webhooks → consumer → domínio + outbox → relay → tópico de notificações → consumer → envio.
+ * Consumers e relay ligados, com atrasos de retentativa de milissegundos.
  *
- * <p>O contexto é descartado ao final ({@link DirtiesContext}): com os workers ligados, ele
- * continuaria processando os eventos gravados pelos outros testes no mesmo banco.
+ * <p>O contexto é descartado ao final ({@link DirtiesContext}): com os consumers ligados, ele
+ * continuaria lendo os tópicos e o banco compartilhados com os outros testes.
  */
 @AutoConfigureObservability(tracing = false)
 @DirtiesContext
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
-        "webhook.worker.events.enabled=true",
-        "webhook.worker.events.interval=100ms",
-        "webhook.worker.events.max-attempts=3",
-        "webhook.worker.events.backoff=200ms",
-        "webhook.worker.notifications.enabled=true",
-        "webhook.worker.notifications.interval=100ms",
+        "webhook.kafka.listeners-enabled=true",
+        "webhook.kafka.events.retry.attempts=3",
+        "webhook.kafka.events.retry.delay-ms=200",
+        "webhook.kafka.events.retry.multiplier=2",
+        "webhook.kafka.events.retry.max-delay-ms=1000",
+        "webhook.kafka.notifications.retry.attempts=3",
+        "webhook.kafka.notifications.retry.delay-ms=200",
+        "webhook.kafka.notifications.retry.multiplier=2",
+        "webhook.kafka.notifications.retry.max-delay-ms=1000",
+        "webhook.relay.enabled=true",
+        "webhook.relay.interval=100ms",
         "webhook.admin.enabled=true",
         "webhook.dev.simulation-enabled=true"
 })
-class PaymentWebhookFlowIT extends PostgresIntegrationTest {
+class PaymentWebhookFlowIT extends IntegrationTest {
 
-    private static final Duration TIMEOUT = Duration.ofSeconds(15);
+    private static final Duration TIMEOUT = Duration.ofSeconds(30);
     private static final String WEBHOOK_URL = "/v1/webhooks/payments";
 
     @Autowired
@@ -164,22 +170,23 @@ class PaymentWebhookFlowIT extends PostgresIntegrationTest {
     }
 
     @Test
-    void redeliveryIsAcknowledgedButProcessedOnce() throws Exception {
+    void redeliveryIsAcceptedButProcessedOnce() throws Exception {
         CreatedOrder order = newOrder();
 
         assertThat(sendEvent("evt_dup", "payment.confirmed", order).getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
-        ResponseEntity<String> again = sendEvent("evt_dup", "payment.confirmed", order);
+        // A recepção não consulta o banco: a reentrega também é aceita, e o consumo descarta a cópia.
+        assertThat(sendEvent("evt_dup", "payment.confirmed", order).getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
 
-        assertThat(again.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(again.getBody()).contains("\"status\":\"duplicate\"");
         await().atMost(TIMEOUT).until(() -> "PROCESSED".equals(eventStatus("evt_dup")));
+        // Tempo para a segunda mensagem ser consumida (mesma chave, mesma partição, logo depois).
+        await().pollDelay(Duration.ofSeconds(1)).atMost(TIMEOUT).until(() -> true);
         assertThat(count("SELECT count(*) FROM webhook_events WHERE provider_event_id = 'evt_dup'")).isEqualTo(1);
         assertThat(count("SELECT count(*) FROM notification_outbox WHERE aggregate_id = ?", order.paymentId()))
                 .isEqualTo(1);
     }
 
     @Test
-    void simultaneousRedeliveriesAreAcceptedExactlyOnce() throws Exception {
+    void simultaneousRedeliveriesHaveASingleEffect() throws Exception {
         CreatedOrder order = newOrder();
         byte[] body = TestData.payload("evt_burst", "payment.confirmed", Instant.now(), order.paymentId(),
                 order.orderId(), 15990).getBytes(StandardCharsets.UTF_8);
@@ -203,8 +210,14 @@ class PaymentWebhookFlowIT extends PostgresIntegrationTest {
             pool.shutdownNow();
         }
 
-        assertThat(statuses).filteredOn(HttpStatus.ACCEPTED::equals).hasSize(1);
-        assertThat(statuses).filteredOn(HttpStatus.OK::equals).hasSize(requests - 1);
+        assertThat(statuses).containsOnly(HttpStatus.ACCEPTED);
+        await().atMost(TIMEOUT).until(() -> "PAID".equals(orderStatus(order.orderId())));
+        await().pollDelay(Duration.ofSeconds(1)).atMost(TIMEOUT).untilAsserted(() -> {
+            assertThat(count("SELECT count(*) FROM webhook_events WHERE provider_event_id = 'evt_burst'")).isEqualTo(1);
+            assertThat(count("SELECT attempts FROM webhook_events WHERE provider_event_id = 'evt_burst'")).isEqualTo(1);
+            assertThat(count("SELECT count(*) FROM notification_outbox WHERE aggregate_id = ?", order.paymentId()))
+                    .isEqualTo(1);
+        });
     }
 
     @Test
@@ -241,7 +254,7 @@ class PaymentWebhookFlowIT extends PostgresIntegrationTest {
         await().atMost(TIMEOUT).untilAsserted(() -> {
             assertThat(eventStatus("evt_early")).isIn("PROCESSED", "DEAD");
         });
-        // Com 3 tentativas a cada 200 ms o evento pode esgotar antes da criação; nesse caso, reprocessa.
+        // Com 3 tentativas em poucos milissegundos o evento pode esgotar antes da criação; nesse caso, reprocessa.
         if ("DEAD".equals(eventStatus("evt_early"))) {
             reprocess("evt_early");
         }

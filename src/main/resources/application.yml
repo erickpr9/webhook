@@ -13,6 +13,29 @@ spring:
   jackson:
     time-zone: UTC
     default-property-inclusion: non_null
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      # Só considera publicado quando todas as réplicas em sincronia gravaram a mensagem.
+      acks: all
+      properties:
+        # Producer idempotente: reenvios internos do cliente não duplicam mensagens no tópico.
+        enable.idempotence: true
+        # Com o broker fora do ar, falha em segundos em vez de segurar a requisição por 1 minuto.
+        max.block.ms: 3000
+        request.timeout.ms: 3000
+        delivery.timeout.ms: 5000
+    consumer:
+      # Grupo novo começa do início do tópico: nenhuma mensagem publicada antes fica para trás.
+      auto-offset-reset: earliest
+      properties:
+        # O consumer não cria tópicos por conta própria: quem cria é a aplicação, com as partições certas.
+        allow.auto.create.topics: false
+    listener:
+      # Confirma o offset de cada mensagem logo depois que o listener termina sem erro.
+      ack-mode: record
+      # Os tópicos são criados pela aplicação; o consumer não deve falhar se ainda não existirem.
+      missing-topics-fatal: false
   task:
     scheduling:
       pool:
@@ -28,6 +51,14 @@ server:
   error:
     include-stacktrace: never
     include-message: never
+
+logging:
+  level:
+    # O cliente do Kafka registra toda a configuração em INFO a cada producer/consumer criado.
+    org.apache.kafka: warn
+    # O caso de uso já registra em ERROR o motivo de cada mensagem enviada à dead-letter; sem isso,
+    # o Spring Kafka repetiria a mesma informação com stack trace.
+    org.springframework.kafka.retrytopic.DeadLetterPublishingRecovererFactory: off
 
 management:
   endpoints:
@@ -55,21 +86,34 @@ webhook:
     secret: ${WEBHOOK_PAYMENT_SECRET}
     tolerance: 300s
     max-body-size: 64KB
-  worker:
+  # Esteira interna sobre o Kafka. Os nomes dos tópicos ficam no código (KafkaTopics).
+  kafka:
+    # Partições dos tópicos principais. Define o paralelismo máximo de cada consumer group.
+    partitions: 3
+    # Tempo máximo de espera pela confirmação do broker ao publicar um webhook recebido.
+    publish-timeout: 5s
+    # Liga ou desliga os consumers (@KafkaListener). Desligados nos testes que não precisam deles.
+    listeners-enabled: true
     events:
-      enabled: true
-      interval: 2s
-      batch-size: 20
-      lease: 2m
-      max-attempts: 6
-      backoff: 10s,30s,2m,10m,1h
+      # Tentativas de processamento (a primeira + as retentativas pelos tópicos de retry).
+      # Atrasos exponenciais: 10s, 30s, 90s, 270s e 810s, limitados a max-delay-ms.
+      retry:
+        attempts: 6
+        delay-ms: 10000
+        multiplier: 3
+        max-delay-ms: 3600000
     notifications:
-      enabled: true
-      interval: 5s
-      batch-size: 50
-      lease: 1m
-      max-attempts: 5
-      backoff: 30s,2m,10m,1h
+      # Atrasos: 30s, 2m, 8m e 32m.
+      retry:
+        attempts: 5
+        delay-ms: 30000
+        multiplier: 4
+        max-delay-ms: 3600000
+  # Relay do outbox: publica no Kafka as notificações gravadas junto com a mudança no pedido.
+  relay:
+    enabled: true
+    interval: 1s
+    batch-size: 100
   notification:
     # URL da API do cliente que recebe o webhook de saída. Vazia: as notificações só vão para o log.
     endpoint-url: ${WEBHOOK_NOTIFICATION_URL:}

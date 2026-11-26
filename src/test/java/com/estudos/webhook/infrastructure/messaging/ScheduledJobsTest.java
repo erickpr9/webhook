@@ -1,38 +1,52 @@
 package com.estudos.webhook.infrastructure.messaging;
 
-import com.estudos.webhook.application.usecase.DispatchPendingNotificationsUseCase;
-import com.estudos.webhook.application.usecase.ProcessPendingWebhookEventsUseCase;
+import com.estudos.webhook.application.usecase.RelayPendingNotificationsUseCase;
+import com.estudos.webhook.infrastructure.config.RelayProperties;
 import org.junit.jupiter.api.Test;
+
+import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Uma falha em um ciclo não pode derrubar o agendamento.
+ * O relay esvazia o outbox em lotes, e uma falha em um ciclo não pode derrubar o agendamento.
  */
 class ScheduledJobsTest {
 
-    @Test
-    void eventJobRunsUseCaseAndSurvivesFailures() {
-        var useCase = mock(ProcessPendingWebhookEventsUseCase.class);
-        when(useCase.execute()).thenReturn(3).thenThrow(new IllegalStateException("db down"));
-        var job = new ProcessPendingEventsJob(useCase);
+    private static final RelayProperties PROPERTIES = new RelayProperties(true, Duration.ofSeconds(1), 10);
 
-        assertThatCode(job::run).doesNotThrowAnyException();
-        assertThatCode(job::run).doesNotThrowAnyException();
-        verify(useCase, org.mockito.Mockito.times(2)).execute();
+    @Test
+    void relayKeepsPublishingWhileBatchesAreFull() {
+        var useCase = mock(RelayPendingNotificationsUseCase.class);
+        when(useCase.execute()).thenReturn(10, 10, 3);
+
+        new NotificationRelayJob(useCase, PROPERTIES).run();
+
+        verify(useCase, times(3)).execute();
     }
 
     @Test
-    void notificationJobRunsUseCaseAndSurvivesFailures() {
-        var useCase = mock(DispatchPendingNotificationsUseCase.class);
-        when(useCase.execute()).thenReturn(1).thenThrow(new IllegalStateException("db down"));
-        var job = new DispatchNotificationsJob(useCase);
+    void relayStopsAfterTheBatchLimitPerCycle() {
+        var useCase = mock(RelayPendingNotificationsUseCase.class);
+        when(useCase.execute()).thenReturn(10);
+
+        new NotificationRelayJob(useCase, PROPERTIES).run();
+
+        verify(useCase, times(NotificationRelayJob.MAX_BATCHES_PER_CYCLE)).execute();
+    }
+
+    @Test
+    void relaySurvivesFailures() {
+        var useCase = mock(RelayPendingNotificationsUseCase.class);
+        when(useCase.execute()).thenThrow(new IllegalStateException("broker down")).thenReturn(0);
+        var job = new NotificationRelayJob(useCase, PROPERTIES);
 
         assertThatCode(job::run).doesNotThrowAnyException();
         assertThatCode(job::run).doesNotThrowAnyException();
-        verify(useCase, org.mockito.Mockito.times(2)).execute();
+        verify(useCase, times(2)).execute();
     }
 }

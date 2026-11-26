@@ -9,50 +9,45 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Porta de persistência da inbox de webhooks.
+ * Registro de processamento dos webhooks consumidos da esteira.
  *
- * <p>As operações de conclusão recebem o número da tentativa ({@code attempt}) como "fencing
- * token": a atualização só acontece se o evento ainda estiver em processamento por aquela
- * tentativa. Assim, um worker cujo lease expirou não sobrescreve o trabalho de outro.
+ * <p>É a chave da idempotência do consumer: a mensagem pode chegar mais de uma vez (reentrega do
+ * broker, reenvio do provedor), mas o registro de cada evento é único por
+ * {@code (provider, providerEventId)} e guarda se ele já foi tratado.
  */
 public interface WebhookEventRepository {
 
     /**
-     * Grava o evento se ainda não existir outro com o mesmo provedor e identificador.
+     * Grava o evento se ainda não existir. Em corrida, apenas uma inserção vence; as outras
+     * esperam a primeira transação terminar.
      *
-     * @return {@code true} se gravou; {@code false} se era duplicado
+     * @return {@code true} se o evento foi inserido agora
      */
     boolean insertIfAbsent(WebhookEvent event);
 
     /**
-     * Reserva até {@code batchSize} eventos prontos para processamento, marcando-os como
-     * {@link WebhookEventStatus#PROCESSING} e incrementando as tentativas. Eventos reservados por
-     * outro worker são pulados. Também retoma eventos cujo lease expirou.
+     * Lê o evento e bloqueia a linha até o fim da transação corrente. Duas cópias da mesma
+     * mensagem processadas ao mesmo tempo ficam em fila: a segunda vê o resultado da primeira.
      */
-    List<WebhookEvent> claimDue(Instant now, Instant leaseUntil, int batchSize);
+    Optional<WebhookEvent> lockForProcessing(String provider, String providerEventId);
+
+    /** Conclui o processamento com {@code PROCESSED} ou {@code IGNORED}. */
+    void complete(UUID id, int attempts, WebhookEventStatus finalStatus, Instant now, String note);
+
+    /** Registra uma tentativa que falhou e quando a próxima deve acontecer. */
+    void recordRetry(UUID id, int attempts, Instant nextAttemptAt, String error);
+
+    /** Move para DEAD (erro permanente ou tentativas esgotadas). */
+    void markDead(UUID id, int attempts, String error);
 
     /**
-     * Move para {@link WebhookEventStatus#DEAD} os eventos com lease expirado que já esgotaram as
-     * tentativas (ex.: o processo morreu várias vezes no mesmo evento).
+     * Recoloca um evento DEAD para reprocessamento, com as tentativas zeradas.
      *
-     * @return quantidade de eventos movidos
+     * @return {@code false} se o evento não estava DEAD
      */
-    int deadLetterAbandoned(Instant now, int maxAttempts);
-
-    /** Conclui o processamento com {@code finalStatus} (PROCESSED ou IGNORED). */
-    boolean complete(UUID id, int attempt, WebhookEventStatus finalStatus, Instant now, String note);
-
-    /** Agenda nova tentativa. */
-    boolean scheduleRetry(UUID id, int attempt, Instant nextAttemptAt, String error);
-
-    /** Move para {@link WebhookEventStatus#DEAD}. */
-    boolean markDead(UUID id, int attempt, String error);
-
-    /** Recoloca um evento DEAD na fila, zerando as tentativas. */
     boolean requeue(UUID id, Instant now);
 
     Optional<WebhookEvent> findById(UUID id);
 
-    /** Lista os eventos mais recentes, filtrando por status quando informado. */
     List<WebhookEvent> findRecent(Optional<WebhookEventStatus> status, int limit);
 }

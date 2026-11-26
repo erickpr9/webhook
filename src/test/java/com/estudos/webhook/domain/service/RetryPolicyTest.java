@@ -37,6 +37,26 @@ class RetryPolicyTest {
     }
 
     @Test
+    void exponentialBackoffGrowsUntilTheMaximum() {
+        RetryPolicy exponential = RetryPolicy.exponential(6, Duration.ofSeconds(10), 3, Duration.ofMinutes(5));
+
+        assertThat(exponential.maxAttempts()).isEqualTo(6);
+        assertThat(exponential.delayAfter(1)).isEqualTo(Duration.ofSeconds(10));
+        assertThat(exponential.delayAfter(2)).isEqualTo(Duration.ofSeconds(30));
+        assertThat(exponential.delayAfter(3)).isEqualTo(Duration.ofSeconds(90));
+        assertThat(exponential.delayAfter(4)).isEqualTo(Duration.ofSeconds(270));
+        assertThat(exponential.delayAfter(5)).isEqualTo(Duration.ofMinutes(5));
+    }
+
+    @Test
+    void exponentialBackoffWithSingleAttemptStillHasAnInterval() {
+        assertThat(RetryPolicy.exponential(1, Duration.ofSeconds(1), 2, Duration.ofSeconds(1)).delayAfter(1))
+                .isEqualTo(Duration.ofSeconds(1));
+        assertThatIllegalArgumentException().isThrownBy(
+                () -> RetryPolicy.exponential(3, Duration.ofSeconds(1), 0.5, Duration.ofSeconds(1)));
+    }
+
+    @Test
     void rejectsInvalidConfiguration() {
         assertThatIllegalArgumentException().isThrownBy(() -> new RetryPolicy(0, List.of(Duration.ofSeconds(1))));
         assertThatIllegalArgumentException().isThrownBy(() -> new RetryPolicy(3, List.of()));

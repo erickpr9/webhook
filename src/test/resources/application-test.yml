@@ -1,4 +1,4 @@
-# Profile de testes. A conexão com o banco vem do Testcontainers (@ServiceConnection).
+# Profile de testes. As conexões com o banco e o Kafka vêm do Testcontainers (@ServiceConnection).
 spring:
   datasource:
     password: test
@@ -6,9 +6,8 @@ spring:
 webhook:
   payment:
     secret: test-secret-with-at-least-thirty-two-characters
-  worker:
-    # Os testes acionam os casos de uso diretamente; os jobs agendados ficam desligados.
-    events:
-      enabled: false
-    notifications:
-      enabled: false
+  kafka:
+    # Os testes acionam os casos de uso diretamente; consumers e relay ficam desligados.
+    listeners-enabled: false
+  relay:
+    enabled: false

@@ -5,31 +5,47 @@ import com.estudos.webhook.application.dto.NotificationView;
 import com.estudos.webhook.application.dto.OutboxNotification;
 
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
+import java.util.OptionalInt;
 import java.util.UUID;
 
 /**
- * Porta do outbox de notificações. O {@link #enqueue} deve participar da transação corrente,
- * para que a notificação só exista se a mudança de domínio for confirmada.
+ * Outbox de notificações.
  *
- * <p>As operações de conclusão usam o número da tentativa como "fencing token", como na inbox.
+ * <pre>
+ * PENDING ──relay──▶ PUBLISHED ──entrega──▶ SENT
+ *                         │
+ *                         ├──▶ RETRY_SCHEDULED ──▶ (nova tentativa) ...
+ *                         └──▶ DEAD
+ * </pre>
  */
 public interface NotificationOutbox {
 
+    /** Grava a notificação na transação corrente, junto com a mudança que a originou. */
     void enqueue(NotificationMessage message, Instant now);
 
-    /** Reserva notificações prontas para envio, incluindo as de lease expirado. */
-    List<OutboxNotification> claimDue(Instant now, Instant leaseUntil, int batchSize);
+    /**
+     * Reserva até {@code batchSize} notificações ainda não publicadas, bloqueando as linhas até o
+     * fim da transação corrente. Linhas já reservadas por outra instância são puladas.
+     */
+    List<OutboxNotification> lockPending(int batchSize);
 
-    /** Move para DEAD as notificações com lease expirado e tentativas esgotadas. */
-    int deadLetterAbandoned(Instant now, int maxAttempts);
+    void markPublished(Collection<UUID> ids, Instant now);
 
-    boolean markSent(UUID id, int attempt, Instant now);
+    /**
+     * Abre uma tentativa de entrega.
+     *
+     * @return número da tentativa, ou vazio se a notificação já foi entregue, já está DEAD ou não existe
+     */
+    OptionalInt startDelivery(UUID id);
 
-    boolean scheduleRetry(UUID id, int attempt, Instant nextAttemptAt, String error);
+    void markSent(UUID id, Instant now);
 
-    boolean markDead(UUID id, int attempt, String error);
+    void scheduleRetry(UUID id, Instant nextAttemptAt, String error);
 
-    /** Notificações mais recentes, para acompanhamento das entregas. */
+    /** Move para DEAD se ainda não estiver em um estado final. */
+    void markDead(UUID id, String error);
+
     List<NotificationView> findRecent(int limit);
 }

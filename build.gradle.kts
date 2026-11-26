@@ -25,6 +25,7 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-actuator")
     implementation("org.flywaydb:flyway-core")
     implementation("org.flywaydb:flyway-database-postgresql")
+    implementation("org.springframework.kafka:spring-kafka")
     implementation(libs.springdoc.openapi)
     implementation(libs.logstash.logback.encoder)
 
@@ -38,6 +39,7 @@ dependencies {
     testImplementation("org.springframework.boot:spring-boot-testcontainers")
     testImplementation("org.testcontainers:junit-jupiter")
     testImplementation("org.testcontainers:postgresql")
+    testImplementation("org.testcontainers:kafka")
     testImplementation("org.awaitility:awaitility")
     testImplementation(libs.archunit.junit5)
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")

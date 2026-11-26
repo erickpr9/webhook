@@ -6,21 +6,23 @@ import com.estudos.webhook.application.handler.PaymentEventHandlerRegistry;
 import com.estudos.webhook.application.handler.RefundPaymentHandler;
 import com.estudos.webhook.application.handler.RefusePaymentHandler;
 import com.estudos.webhook.application.port.NotificationOutbox;
+import com.estudos.webhook.application.port.NotificationPublisher;
 import com.estudos.webhook.application.port.NotificationSender;
 import com.estudos.webhook.application.port.OrderRepository;
 import com.estudos.webhook.application.port.PaymentEventPayloadReader;
 import com.estudos.webhook.application.port.PaymentRepository;
 import com.estudos.webhook.application.port.TransactionRunner;
+import com.estudos.webhook.application.port.WebhookEventPublisher;
 import com.estudos.webhook.application.port.WebhookEventRepository;
 import com.estudos.webhook.application.port.WebhookMetrics;
 import com.estudos.webhook.application.usecase.CreateOrderUseCase;
-import com.estudos.webhook.application.usecase.DispatchPendingNotificationsUseCase;
+import com.estudos.webhook.application.usecase.DeliverNotificationUseCase;
 import com.estudos.webhook.application.usecase.GetOrderUseCase;
 import com.estudos.webhook.application.usecase.GetWebhookEventUseCase;
 import com.estudos.webhook.application.usecase.ListNotificationsUseCase;
 import com.estudos.webhook.application.usecase.ListWebhookEventsUseCase;
-import com.estudos.webhook.application.usecase.ProcessPendingWebhookEventsUseCase;
 import com.estudos.webhook.application.usecase.ProcessWebhookEventUseCase;
+import com.estudos.webhook.application.usecase.RelayPendingNotificationsUseCase;
 import com.estudos.webhook.application.usecase.RegisterWebhookEventUseCase;
 import com.estudos.webhook.application.usecase.ReprocessWebhookEventUseCase;
 import org.springframework.context.annotation.Bean;
@@ -66,12 +68,12 @@ public class UseCaseConfig {
         return new PaymentEventHandlerRegistry(handlers);
     }
 
-    // ── Inbox ───────────────────────────────────────────────────────────────
+    // ── Webhooks ────────────────────────────────────────────────────────────
 
     @Bean
-    RegisterWebhookEventUseCase registerWebhookEventUseCase(WebhookEventRepository repository,
+    RegisterWebhookEventUseCase registerWebhookEventUseCase(WebhookEventPublisher publisher,
                                                             WebhookMetrics metrics, Clock clock) {
-        return new RegisterWebhookEventUseCase(repository, metrics, clock);
+        return new RegisterWebhookEventUseCase(publisher, metrics, clock);
     }
 
     @Bean
@@ -79,22 +81,17 @@ public class UseCaseConfig {
                                                           PaymentEventPayloadReader payloadReader,
                                                           PaymentEventHandlerRegistry handlers,
                                                           TransactionRunner transactions,
-                                                          WorkerProperties properties,
+                                                          KafkaPipelineProperties properties,
                                                           WebhookMetrics metrics, Clock clock) {
         return new ProcessWebhookEventUseCase(repository, payloadReader, handlers, transactions,
-                properties.events().toSettings().retryPolicy(), metrics, clock);
+                properties.events().retry().toPolicy(), metrics, clock);
     }
 
     @Bean
-    ProcessPendingWebhookEventsUseCase processPendingWebhookEventsUseCase(WebhookEventRepository repository,
-                                                                          ProcessWebhookEventUseCase processor,
-                                                                          WorkerProperties properties, Clock clock) {
-        return new ProcessPendingWebhookEventsUseCase(repository, processor, properties.events().toSettings(), clock);
-    }
-
-    @Bean
-    ReprocessWebhookEventUseCase reprocessWebhookEventUseCase(WebhookEventRepository repository, Clock clock) {
-        return new ReprocessWebhookEventUseCase(repository, clock);
+    ReprocessWebhookEventUseCase reprocessWebhookEventUseCase(WebhookEventRepository repository,
+                                                              WebhookEventPublisher publisher,
+                                                              PaymentEventPayloadReader payloadReader, Clock clock) {
+        return new ReprocessWebhookEventUseCase(repository, publisher, payloadReader, clock);
     }
 
     @Bean
@@ -110,11 +107,18 @@ public class UseCaseConfig {
     // ── Notificações ────────────────────────────────────────────────────────
 
     @Bean
-    DispatchPendingNotificationsUseCase dispatchPendingNotificationsUseCase(NotificationOutbox outbox,
-                                                                            NotificationSender sender,
-                                                                            WorkerProperties properties,
-                                                                            WebhookMetrics metrics, Clock clock) {
-        return new DispatchPendingNotificationsUseCase(outbox, sender, properties.notifications().toSettings(),
+    RelayPendingNotificationsUseCase relayPendingNotificationsUseCase(NotificationOutbox outbox,
+                                                                      NotificationPublisher publisher,
+                                                                      TransactionRunner transactions,
+                                                                      RelayProperties properties, Clock clock) {
+        return new RelayPendingNotificationsUseCase(outbox, publisher, transactions, properties.batchSize(), clock);
+    }
+
+    @Bean
+    DeliverNotificationUseCase deliverNotificationUseCase(NotificationOutbox outbox, NotificationSender sender,
+                                                          KafkaPipelineProperties properties,
+                                                          WebhookMetrics metrics, Clock clock) {
+        return new DeliverNotificationUseCase(outbox, sender, properties.notifications().retry().toPolicy(),
                 metrics, clock);
     }
 

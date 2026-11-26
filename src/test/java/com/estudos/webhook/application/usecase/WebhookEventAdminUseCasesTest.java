@@ -1,6 +1,10 @@
 package com.estudos.webhook.application.usecase;
 
 import com.estudos.webhook.application.dto.WebhookEventView;
+import com.estudos.webhook.application.dto.ReceivedWebhookEvent;
+import com.estudos.webhook.application.exception.MalformedPayloadException;
+import com.estudos.webhook.application.port.PaymentEventPayloadReader;
+import com.estudos.webhook.application.port.WebhookEventPublisher;
 import com.estudos.webhook.application.port.WebhookEventRepository;
 import com.estudos.webhook.domain.exception.WebhookEventNotFoundException;
 import com.estudos.webhook.domain.exception.WebhookEventNotReprocessableException;
@@ -9,6 +13,7 @@ import com.estudos.webhook.domain.model.WebhookEventStatus;
 import com.estudos.webhook.support.TestData;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -23,6 +28,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -30,8 +36,16 @@ class WebhookEventAdminUseCasesTest {
 
     @Mock
     private WebhookEventRepository repository;
+    @Mock
+    private WebhookEventPublisher publisher;
+    @Mock
+    private PaymentEventPayloadReader payloadReader;
 
     private final Clock clock = Clock.fixed(TestData.NOW, ZoneOffset.UTC);
+
+    private ReprocessWebhookEventUseCase reprocess() {
+        return new ReprocessWebhookEventUseCase(repository, publisher, payloadReader, clock);
+    }
 
     private static WebhookEvent withStatus(UUID id, WebhookEventStatus status) {
         return new WebhookEvent(id, "gateway", "evt_1", "payment.confirmed", "{}", status, 6, TestData.NOW,
@@ -45,10 +59,29 @@ class WebhookEventAdminUseCasesTest {
                 Optional.of(withStatus(id, WebhookEventStatus.RETRY_SCHEDULED)));
         when(repository.requeue(id, TestData.NOW)).thenReturn(true);
 
-        WebhookEventView view = new ReprocessWebhookEventUseCase(repository, clock).execute(id);
+        when(payloadReader.read("{}")).thenReturn(TestData.eventData());
+
+        WebhookEventView view = reprocess().execute(id);
 
         assertThat(view.status()).isEqualTo("RETRY_SCHEDULED");
         assertThat(view.lastError()).isEqualTo("boom");
+        verify(publisher).publish(new ReceivedWebhookEvent("gateway", "evt_1", "payment.confirmed", TestData.NOW,
+                TestData.NOW, TestData.ORDER_ID, "{}"));
+    }
+
+    @Test
+    void reprocessOfUnreadablePayloadUsesTheEventAsOrderingKey() {
+        UUID id = UUID.randomUUID();
+        when(repository.findById(id)).thenReturn(Optional.of(withStatus(id, WebhookEventStatus.DEAD)),
+                Optional.of(withStatus(id, WebhookEventStatus.RETRY_SCHEDULED)));
+        when(repository.requeue(id, TestData.NOW)).thenReturn(true);
+        when(payloadReader.read("{}")).thenThrow(new MalformedPayloadException("bad"));
+
+        reprocess().execute(id);
+
+        ArgumentCaptor<ReceivedWebhookEvent> published = ArgumentCaptor.forClass(ReceivedWebhookEvent.class);
+        verify(publisher).publish(published.capture());
+        assertThat(published.getValue().partitionKey()).isEqualTo("evt_1");
     }
 
     @Test
@@ -56,10 +89,11 @@ class WebhookEventAdminUseCasesTest {
         UUID id = UUID.randomUUID();
         when(repository.findById(id)).thenReturn(Optional.of(withStatus(id, WebhookEventStatus.PROCESSED)));
 
-        assertThatThrownBy(() -> new ReprocessWebhookEventUseCase(repository, clock).execute(id))
+        assertThatThrownBy(() -> reprocess().execute(id))
                 .isInstanceOf(WebhookEventNotReprocessableException.class)
                 .hasMessageContaining("PROCESSED");
         verify(repository, never()).requeue(any(), any());
+        verifyNoInteractions(publisher);
     }
 
     @Test
@@ -69,7 +103,7 @@ class WebhookEventAdminUseCasesTest {
                 Optional.of(withStatus(id, WebhookEventStatus.RETRY_SCHEDULED)));
         when(repository.requeue(id, TestData.NOW)).thenReturn(false);
 
-        assertThatThrownBy(() -> new ReprocessWebhookEventUseCase(repository, clock).execute(id))
+        assertThatThrownBy(() -> reprocess().execute(id))
                 .isInstanceOf(WebhookEventNotReprocessableException.class)
                 .hasMessageContaining("RETRY_SCHEDULED");
     }
@@ -79,7 +113,7 @@ class WebhookEventAdminUseCasesTest {
         UUID id = UUID.randomUUID();
         when(repository.findById(id)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> new ReprocessWebhookEventUseCase(repository, clock).execute(id))
+        assertThatThrownBy(() -> reprocess().execute(id))
                 .isInstanceOf(WebhookEventNotFoundException.class);
     }
 

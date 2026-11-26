@@ -32,12 +32,25 @@ class WebhookEnvelopeReaderTest {
     }
 
     @Test
-    void readsEnvelopeAndIgnoresData() {
+    void readsEnvelopeAndOnlyTheOrderFromData() {
         WebhookEnvelope envelope = reader.read(json("""
-                {"id":"evt_1","type":"payment.confirmed","created_at":"2026-11-26T14:03:11Z","data":{"x":1}}"""));
+                {"id":"evt_1","type":"payment.confirmed","created_at":"2026-11-26T14:03:11Z",
+                 "data":{"order_id":"ord_9","x":1}}"""));
 
         assertThat(envelope).isEqualTo(new WebhookEnvelope("evt_1", "payment.confirmed",
-                Instant.parse("2026-11-26T14:03:11Z")));
+                Instant.parse("2026-11-26T14:03:11Z"), new WebhookEnvelope.Data("ord_9")));
+        assertThat(envelope.partitionKey()).isEqualTo("ord_9");
+    }
+
+    @Test
+    void eventWithoutOrderIsKeyedByItsId() {
+        WebhookEnvelope noData = reader.read(json("""
+                {"id":"evt_1","type":"customer.created","created_at":"2026-11-26T14:03:11Z"}"""));
+        WebhookEnvelope blankOrder = reader.read(json("""
+                {"id":"evt_2","type":"payment.confirmed","created_at":"2026-11-26T14:03:11Z","data":{"order_id":" "}}"""));
+
+        assertThat(noData.partitionKey()).isEqualTo("evt_1");
+        assertThat(blankOrder.partitionKey()).isEqualTo("evt_2");
     }
 
     @Test
