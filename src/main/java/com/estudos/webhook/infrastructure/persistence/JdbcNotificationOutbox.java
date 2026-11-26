@@ -12,13 +12,19 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
+import java.util.OptionalInt;
 import java.util.UUID;
 
 import static com.estudos.webhook.infrastructure.persistence.JdbcTimestamps.toDb;
 
 /**
- * Outbox de notificações em PostgreSQL. Usa o mesmo padrão de reserva com lease da inbox.
+ * Outbox de notificações em PostgreSQL.
+ *
+ * <p>O relay reserva as linhas pendentes com {@code FOR UPDATE SKIP LOCKED}: várias instâncias
+ * podem publicar em paralelo sem pegar a mesma notificação. A entrega abre cada tentativa com um
+ * {@code UPDATE} condicional, que não tem efeito se a notificação já estiver em estado final.
  */
 @Repository
 public class JdbcNotificationOutbox implements NotificationOutbox {
@@ -29,49 +35,46 @@ public class JdbcNotificationOutbox implements NotificationOutbox {
             VALUES (:id, :type, :aggregateId, CAST(:payload AS jsonb), 'PENDING', 0, :now, :now)
             """;
 
-    private static final String CLAIM_DUE = """
-            UPDATE notification_outbox
-               SET status = 'PROCESSING',
-                   attempts = attempts + 1,
-                   locked_until = :leaseUntil
-             WHERE id IN (
-                   SELECT id
-                     FROM notification_outbox
-                    WHERE (status IN ('PENDING', 'RETRY_SCHEDULED') AND next_attempt_at <= :now)
-                       OR (status = 'PROCESSING' AND locked_until < :now)
-                    ORDER BY created_at
-                    LIMIT :batchSize
-                      FOR UPDATE SKIP LOCKED)
-            RETURNING id, attempts, payload
+    private static final String LOCK_PENDING = """
+            SELECT id, payload
+              FROM notification_outbox
+             WHERE status = 'PENDING'
+             ORDER BY created_at
+             LIMIT :batchSize
+               FOR UPDATE SKIP LOCKED
             """;
 
-    private static final String DEAD_LETTER_ABANDONED = """
+    private static final String MARK_PUBLISHED = """
             UPDATE notification_outbox
-               SET status = 'DEAD',
-                   locked_until = NULL,
-                   last_error = 'Delivery lease expired after the maximum number of attempts'
-             WHERE status = 'PROCESSING'
-               AND locked_until < :now
-               AND attempts >= :maxAttempts
+               SET status = 'PUBLISHED', published_at = :now
+             WHERE id IN (:ids) AND status = 'PENDING'
+            """;
+
+    // PENDING entra na lista porque a mensagem pode chegar ao consumer antes de o relay marcar
+    // PUBLISHED: o UPDATE espera o lock do relay e, depois, encontra a linha já publicada.
+    private static final String START_DELIVERY = """
+            UPDATE notification_outbox
+               SET attempts = attempts + 1
+             WHERE id = :id AND status IN ('PENDING', 'PUBLISHED', 'RETRY_SCHEDULED')
+            RETURNING attempts
             """;
 
     private static final String MARK_SENT = """
             UPDATE notification_outbox
-               SET status = 'SENT', sent_at = :now, locked_until = NULL
-             WHERE id = :id AND status = 'PROCESSING' AND attempts = :attempt
+               SET status = 'SENT', sent_at = :now, last_error = NULL
+             WHERE id = :id
             """;
 
     private static final String SCHEDULE_RETRY = """
             UPDATE notification_outbox
-               SET status = 'RETRY_SCHEDULED', next_attempt_at = :nextAttemptAt, last_error = :error,
-                   locked_until = NULL
-             WHERE id = :id AND status = 'PROCESSING' AND attempts = :attempt
+               SET status = 'RETRY_SCHEDULED', next_attempt_at = :nextAttemptAt, last_error = :error
+             WHERE id = :id AND status <> 'SENT'
             """;
 
     private static final String MARK_DEAD = """
             UPDATE notification_outbox
-               SET status = 'DEAD', last_error = :error, locked_until = NULL
-             WHERE id = :id AND status = 'PROCESSING' AND attempts = :attempt
+               SET status = 'DEAD', last_error = :error
+             WHERE id = :id AND status NOT IN ('SENT', 'DEAD')
             """;
 
     private static final String FIND_RECENT = """
@@ -103,7 +106,6 @@ public class JdbcNotificationOutbox implements NotificationOutbox {
         this.objectMapper = objectMapper;
         this.rowMapper = (rs, rowNum) -> new OutboxNotification(
                 rs.getObject("id", UUID.class),
-                rs.getInt("attempts"),
                 fromJson(rs.getString("payload")));
     }
 
@@ -119,49 +121,55 @@ public class JdbcNotificationOutbox implements NotificationOutbox {
     }
 
     @Override
-    public List<OutboxNotification> claimDue(Instant now, Instant leaseUntil, int batchSize) {
+    public List<OutboxNotification> lockPending(int batchSize) {
+        return jdbc.query(LOCK_PENDING, new MapSqlParameterSource("batchSize", batchSize), rowMapper);
+    }
+
+    @Override
+    public void markPublished(Collection<UUID> ids, Instant now) {
+        if (ids.isEmpty()) {
+            return;
+        }
         var params = new MapSqlParameterSource()
-                .addValue("now", toDb(now))
-                .addValue("leaseUntil", toDb(leaseUntil))
-                .addValue("batchSize", batchSize);
-        return jdbc.query(CLAIM_DUE, params, rowMapper);
+                .addValue("ids", ids)
+                .addValue("now", toDb(now));
+        jdbc.update(MARK_PUBLISHED, params);
     }
 
     @Override
-    public int deadLetterAbandoned(Instant now, int maxAttempts) {
+    public OptionalInt startDelivery(UUID id) {
+        List<Integer> attempts = jdbc.queryForList(START_DELIVERY, new MapSqlParameterSource("id", id), Integer.class);
+        return attempts.isEmpty() ? OptionalInt.empty() : OptionalInt.of(attempts.getFirst());
+    }
+
+    @Override
+    public void markSent(UUID id, Instant now) {
         var params = new MapSqlParameterSource()
-                .addValue("now", toDb(now))
-                .addValue("maxAttempts", maxAttempts);
-        return jdbc.update(DEAD_LETTER_ABANDONED, params);
+                .addValue("id", id)
+                .addValue("now", toDb(now));
+        jdbc.update(MARK_SENT, params);
     }
 
     @Override
-    public boolean markSent(UUID id, int attempt, Instant now) {
-        return jdbc.update(MARK_SENT, fenced(id, attempt).addValue("now", toDb(now))) == 1;
-    }
-
-    @Override
-    public boolean scheduleRetry(UUID id, int attempt, Instant nextAttemptAt, String error) {
-        var params = fenced(id, attempt)
+    public void scheduleRetry(UUID id, Instant nextAttemptAt, String error) {
+        var params = new MapSqlParameterSource()
+                .addValue("id", id)
                 .addValue("nextAttemptAt", toDb(nextAttemptAt))
                 .addValue("error", error);
-        return jdbc.update(SCHEDULE_RETRY, params) == 1;
+        jdbc.update(SCHEDULE_RETRY, params);
     }
 
     @Override
-    public boolean markDead(UUID id, int attempt, String error) {
-        return jdbc.update(MARK_DEAD, fenced(id, attempt).addValue("error", error)) == 1;
+    public void markDead(UUID id, String error) {
+        var params = new MapSqlParameterSource()
+                .addValue("id", id)
+                .addValue("error", error);
+        jdbc.update(MARK_DEAD, params);
     }
 
     @Override
     public List<NotificationView> findRecent(int limit) {
         return jdbc.query(FIND_RECENT, new MapSqlParameterSource("limit", limit), VIEW_MAPPER);
-    }
-
-    private static MapSqlParameterSource fenced(UUID id, int attempt) {
-        return new MapSqlParameterSource()
-                .addValue("id", id)
-                .addValue("attempt", attempt);
     }
 
     private String toJson(NotificationMessage message) {

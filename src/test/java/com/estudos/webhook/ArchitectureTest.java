@@ -68,6 +68,13 @@ class ArchitectureTest {
     }
 
     @Test
+    void kafkaStaysInsideTheInfrastructure() {
+        noClasses().that().resideOutsideOfPackage(BASE + ".infrastructure..")
+                .should().dependOnClassesThat().resideInAnyPackage("org.apache.kafka..", "org.springframework.kafka..")
+                .check(CLASSES);
+    }
+
+    @Test
     void devToolsStayOutOfTheCoreLayers() {
         noClasses().that().resideInAnyPackage(BASE + ".domain..", BASE + ".application..")
                 .should().dependOnClassesThat().resideInAPackage(BASE + ".dev..")

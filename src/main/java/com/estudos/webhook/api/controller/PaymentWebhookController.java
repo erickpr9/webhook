@@ -7,7 +7,6 @@ import com.estudos.webhook.api.response.WebhookReceivedResponse;
 import com.estudos.webhook.api.security.WebhookSecurityProperties;
 import com.estudos.webhook.api.security.WebhookSignatureVerifier;
 import com.estudos.webhook.application.dto.RegisterWebhookEventCommand;
-import com.estudos.webhook.application.dto.RegistrationResult;
 import com.estudos.webhook.application.usecase.RegisterWebhookEventUseCase;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
@@ -25,7 +24,7 @@ import java.nio.charset.StandardCharsets;
 /**
  * Recebe os webhooks do provedor de pagamentos.
  *
- * <p>Controller fino: autentica, valida o envelope e grava na inbox. O processamento é
+ * <p>Controller fino: autentica, valida o envelope e publica na esteira. O processamento é
  * assíncrono. Ordem das validações (da mais barata para a mais cara): tamanho do corpo
  * (filtro), headers, janela de tempo, assinatura e, por fim, o JSON.
  */
@@ -54,11 +53,12 @@ public class PaymentWebhookController {
 
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
     @Operation(summary = "Recebe um evento de pagamento assinado com HMAC-SHA256")
-    @ApiResponse(responseCode = "202", description = "Evento novo, aceito para processamento")
-    @ApiResponse(responseCode = "200", description = "Evento já recebido antes (reentrega)")
+    @ApiResponse(responseCode = "202", description = "Evento aceito para processamento (reentregas também: a "
+            + "deduplicação acontece no consumo)")
     @ApiResponse(responseCode = "400", description = "Headers ou payload inválidos")
     @ApiResponse(responseCode = "401", description = "Assinatura inválida ou fora da janela de tempo")
     @ApiResponse(responseCode = "413", description = "Corpo acima do limite")
+    @ApiResponse(responseCode = "503", description = "Esteira indisponível; o provedor deve reenviar depois")
     public ResponseEntity<WebhookReceivedResponse> receive(
             @RequestHeader(EVENT_ID_HEADER) String eventId,
             @RequestHeader(TIMESTAMP_HEADER) String timestamp,
@@ -72,11 +72,9 @@ public class PaymentWebhookController {
             throw new InvalidWebhookRequestException(EVENT_ID_HEADER + " does not match the payload id");
         }
 
-        RegistrationResult result = registerWebhookEvent.execute(new RegisterWebhookEventCommand(
-                provider, eventId, envelope.type(), envelope.createdAt(), new String(body, StandardCharsets.UTF_8)));
+        registerWebhookEvent.execute(new RegisterWebhookEventCommand(provider, eventId, envelope.type(),
+                envelope.createdAt(), envelope.partitionKey(), new String(body, StandardCharsets.UTF_8)));
 
-        return result.duplicate()
-                ? ResponseEntity.ok(WebhookReceivedResponse.duplicate(eventId))
-                : ResponseEntity.accepted().body(WebhookReceivedResponse.received(eventId));
+        return ResponseEntity.accepted().body(WebhookReceivedResponse.received(eventId));
     }
 }
