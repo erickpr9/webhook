@@ -1,0 +1,14 @@
+# Profile de testes. A conexão com o banco vem do Testcontainers (@ServiceConnection).
+spring:
+  datasource:
+    password: test
+
+webhook:
+  payment:
+    secret: test-secret-with-at-least-thirty-two-characters
+  worker:
+    # Os testes acionam os casos de uso diretamente; os jobs agendados ficam desligados.
+    events:
+      enabled: false
+    notifications:
+      enabled: false

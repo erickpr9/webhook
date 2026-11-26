@@ -1,0 +1,22 @@
+# Postgres local para desenvolvimento.
+# A porta do host é 5433 para não conflitar com um Postgres já instalado na 5432.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: webhook-postgres
+    environment:
+      POSTGRES_DB: webhook
+      POSTGRES_USER: webhook
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-webhook}
+    ports:
+      - "${DB_PORT:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U webhook -d webhook"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:

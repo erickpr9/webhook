@@ -1,0 +1,35 @@
+# Profile de desenvolvimento local. Ative com SPRING_PROFILES_ACTIVE=local.
+spring:
+  datasource:
+    password: ${DB_PASSWORD:webhook}
+  flyway:
+    # Inclui os dados de exemplo (somente local).
+    locations: classpath:db/migration,classpath:db/dev
+
+logging:
+  pattern:
+    # Formato enxuto para o terminal: hora, nível, evento (só quando houver), classe e mensagem.
+    console: "%clr(%d{HH:mm:ss.SSS}){faint} %clr(%5p) %clr(%-36logger{0}){cyan} : %replace([evento %X{eventId}] ){'\\[evento \\] ', ''}%m%n%wEx"
+
+management:
+  endpoint:
+    health:
+      show-details: always
+
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
+
+webhook:
+  payment:
+    secret: ${WEBHOOK_PAYMENT_SECRET:local-dev-only-secret-change-me-0123456789}
+  notification:
+    # API da loja (projeto cliente-webhook). Se ela estiver fora do ar, as notificações ficam em retentativa.
+    endpoint-url: ${WEBHOOK_NOTIFICATION_URL:http://localhost:8081/webhooks/payment-notifications}
+    secret: ${WEBHOOK_NOTIFICATION_SECRET:local-dev-only-client-secret-0123456789abc}
+  admin:
+    enabled: true
+  dev:
+    simulation-enabled: true

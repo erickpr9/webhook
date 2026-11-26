@@ -1,0 +1,562 @@
+{
+  "info": {
+    "name": "Webhook Study - Payment Confirmation",
+    "description": "Esteira de webhook de confirmação de pagamento (projeto de estudo).\n\nComo usar:\n1. Suba o Postgres (`docker compose up -d`) e a aplicação no profile `local`.\n2. Selecione o environment **Webhook Study - Local**.\n3. Envie os requests da pasta **1. Webhooks (provedor)**. A assinatura HMAC é calculada automaticamente pelo pre-request script da pasta.\n4. Acompanhe o efeito em **2. Pedidos** e **3. Admin**.\n\nOs requests de webhook usam `orderId`, `paymentId` e `amount` das variáveis da collection (padrão: pedido de exemplo `ord_1042`). O request **Criar pedido** da pasta **4. Simulação** cria um pedido novo e atualiza essas variáveis.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080", "description": "URL da aplicação. O environment sobrescreve este valor." },
+    { "key": "webhookSecret", "value": "local-dev-only-secret-change-me-0123456789", "description": "Segredo HMAC de desenvolvimento local (mesmo do application-local.yml). O environment sobrescreve este valor." },
+    { "key": "orderId", "value": "ord_1042", "description": "Pedido alvo dos webhooks." },
+    { "key": "paymentId", "value": "pay_001", "description": "Pagamento alvo dos webhooks." },
+    { "key": "amount", "value": "15990", "description": "Valor em centavos enviado nos webhooks." },
+    { "key": "currency", "value": "BRL", "description": "Moeda enviada nos webhooks." },
+    { "key": "webhookEventId", "value": "", "description": "Id interno de um evento da inbox, preenchido pelos requests de listagem do Admin." }
+  ],
+  "item": [
+    {
+      "name": "1. Webhooks (provedor)",
+      "description": "Simula o provedor de pagamentos. O pre-request script desta pasta:\n- gera um `eventId` novo a cada envio (a menos que o request fixe um valor no header `X-Event-Id`);\n- preenche `createdAt` com o horário atual;\n- calcula `X-Signature = sha256=HMAC-SHA256(webhookSecret, \"{X-Timestamp}.{body}\")` sobre o corpo final, já com as variáveis resolvidas.",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// Assina o webhook como o provedor faria: HMAC-SHA256 de \"{timestamp}.{body}\".",
+              "// O id do evento é novo a cada envio, a menos que o request fixe um valor no header X-Event-Id.",
+              "const eventIdHeader = pm.request.headers.get('X-Event-Id');",
+              "const eventId = eventIdHeader && !eventIdHeader.includes('{{')",
+              "    ? eventIdHeader",
+              "    : 'evt_' + pm.variables.replaceIn('{{$guid}}').replace(/-/g, '');",
+              "pm.variables.set('eventId', eventId);",
+              "pm.variables.set('createdAt', new Date().toISOString());",
+              "",
+              "// A assinatura é calculada sobre o corpo final, com todas as variáveis já resolvidas.",
+              "const timestamp = Math.floor(Date.now() / 1000).toString();",
+              "const body = pm.variables.replaceIn(pm.request.body.raw);",
+              "const secret = pm.variables.get('webhookSecret');",
+              "const signature = CryptoJS.HmacSHA256(timestamp + '.' + body, secret).toString(CryptoJS.enc.Hex);",
+              "",
+              "pm.variables.set('timestamp', timestamp);",
+              "pm.variables.set('signature', 'sha256=' + signature);"
+            ]
+          }
+        }
+      ],
+      "item": [
+        {
+          "name": "Pagamento confirmado",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Evento aceito (202)', () => pm.response.to.have.status(202));",
+                  "pm.test('Resposta traz o id do evento', () => pm.expect(pm.response.json().eventId).to.eql(pm.variables.get('eventId')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "description": "Pagamento PENDING vira CONFIRMED e o pedido vira PAID. Consulte o resultado em **2. Pedidos**.",
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Event-Id", "value": "{{eventId}}" },
+              { "key": "X-Timestamp", "value": "{{timestamp}}" },
+              { "key": "X-Signature", "value": "{{signature}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"{{eventId}}\",\n  \"type\": \"payment.confirmed\",\n  \"created_at\": \"{{createdAt}}\",\n  \"data\": {\n    \"payment_id\": \"{{paymentId}}\",\n    \"order_id\": \"{{orderId}}\",\n    \"amount\": {{amount}},\n    \"currency\": \"{{currency}}\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{baseUrl}}/v1/webhooks/payments", "host": ["{{baseUrl}}"], "path": ["v1", "webhooks", "payments"] }
+          }
+        },
+        {
+          "name": "Pagamento recusado",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Evento aceito (202)', () => pm.response.to.have.status(202));"]
+              }
+            }
+          ],
+          "request": {
+            "description": "Pagamento PENDING vira REFUSED; o pedido continua PENDING_PAYMENT. Se o pagamento já estiver confirmado, a transição é ignorada.",
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Event-Id", "value": "{{eventId}}" },
+              { "key": "X-Timestamp", "value": "{{timestamp}}" },
+              { "key": "X-Signature", "value": "{{signature}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"{{eventId}}\",\n  \"type\": \"payment.refused\",\n  \"created_at\": \"{{createdAt}}\",\n  \"data\": {\n    \"payment_id\": \"{{paymentId}}\",\n    \"order_id\": \"{{orderId}}\",\n    \"amount\": {{amount}},\n    \"currency\": \"{{currency}}\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{baseUrl}}/v1/webhooks/payments", "host": ["{{baseUrl}}"], "path": ["v1", "webhooks", "payments"] }
+          }
+        },
+        {
+          "name": "Pagamento estornado",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Evento aceito (202)', () => pm.response.to.have.status(202));"]
+              }
+            }
+          ],
+          "request": {
+            "description": "Pagamento CONFIRMED vira REFUNDED e o pedido vira REFUNDED. Envie depois de **Pagamento confirmado**.",
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Event-Id", "value": "{{eventId}}" },
+              { "key": "X-Timestamp", "value": "{{timestamp}}" },
+              { "key": "X-Signature", "value": "{{signature}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"{{eventId}}\",\n  \"type\": \"payment.refunded\",\n  \"created_at\": \"{{createdAt}}\",\n  \"data\": {\n    \"payment_id\": \"{{paymentId}}\",\n    \"order_id\": \"{{orderId}}\",\n    \"amount\": {{amount}},\n    \"currency\": \"{{currency}}\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{baseUrl}}/v1/webhooks/payments", "host": ["{{baseUrl}}"], "path": ["v1", "webhooks", "payments"] }
+          }
+        },
+        {
+          "name": "Reentrega (mesmo evento)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Primeira vez: 202 (received). A partir da segunda: 200 (duplicate).",
+                  "pm.test('Aceito ou reconhecido como duplicado', () => pm.expect(pm.response.code).to.be.oneOf([200, 202]));",
+                  "if (pm.response.code === 200) {",
+                  "    pm.test('Marcado como duplicado', () => pm.expect(pm.response.json().status).to.eql('duplicate'));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "description": "O header `X-Event-Id` é fixo (`evt_redelivery_demo`). Envie duas vezes: a primeira responde 202 e a segunda 200 `duplicate`, sem processar de novo.",
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Event-Id", "value": "evt_redelivery_demo" },
+              { "key": "X-Timestamp", "value": "{{timestamp}}" },
+              { "key": "X-Signature", "value": "{{signature}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"{{eventId}}\",\n  \"type\": \"payment.confirmed\",\n  \"created_at\": \"{{createdAt}}\",\n  \"data\": {\n    \"payment_id\": \"{{paymentId}}\",\n    \"order_id\": \"{{orderId}}\",\n    \"amount\": {{amount}},\n    \"currency\": \"{{currency}}\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{baseUrl}}/v1/webhooks/payments", "host": ["{{baseUrl}}"], "path": ["v1", "webhooks", "payments"] }
+          }
+        },
+        {
+          "name": "Evento fora de ordem (recusa antiga)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Evento aceito (202)', () => pm.response.to.have.status(202));"]
+              }
+            }
+          ],
+          "request": {
+            "description": "`created_at` fixo em 2020. Depois de confirmar o pagamento, este evento é marcado PROCESSED com a nota `STALE_EVENT` e o pagamento continua CONFIRMED.",
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Event-Id", "value": "{{eventId}}" },
+              { "key": "X-Timestamp", "value": "{{timestamp}}" },
+              { "key": "X-Signature", "value": "{{signature}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"{{eventId}}\",\n  \"type\": \"payment.refused\",\n  \"created_at\": \"2020-01-01T00:00:00Z\",\n  \"data\": {\n    \"payment_id\": \"{{paymentId}}\",\n    \"order_id\": \"{{orderId}}\",\n    \"amount\": {{amount}},\n    \"currency\": \"{{currency}}\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{baseUrl}}/v1/webhooks/payments", "host": ["{{baseUrl}}"], "path": ["v1", "webhooks", "payments"] }
+          }
+        },
+        {
+          "name": "Pagamento inexistente (retentativa)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Evento aceito (202)', () => pm.response.to.have.status(202));"]
+              }
+            }
+          ],
+          "request": {
+            "description": "Aponta para `pay_999`, que não existe. O evento entra em RETRY_SCHEDULED com backoff e, após 6 tentativas, vai para DEAD. Acompanhe em **3. Admin**.",
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Event-Id", "value": "{{eventId}}" },
+              { "key": "X-Timestamp", "value": "{{timestamp}}" },
+              { "key": "X-Signature", "value": "{{signature}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"{{eventId}}\",\n  \"type\": \"payment.confirmed\",\n  \"created_at\": \"{{createdAt}}\",\n  \"data\": {\n    \"payment_id\": \"pay_999\",\n    \"order_id\": \"ord_999\",\n    \"amount\": 1000,\n    \"currency\": \"BRL\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{baseUrl}}/v1/webhooks/payments", "host": ["{{baseUrl}}"], "path": ["v1", "webhooks", "payments"] }
+          }
+        },
+        {
+          "name": "Valor divergente (DEAD imediato)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Evento aceito (202)', () => pm.response.to.have.status(202));"]
+              }
+            }
+          ],
+          "request": {
+            "description": "Valor de 1 centavo, diferente do pagamento. É uma violação de regra de negócio: vai para DEAD na primeira tentativa, sem alterar o pedido.",
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Event-Id", "value": "{{eventId}}" },
+              { "key": "X-Timestamp", "value": "{{timestamp}}" },
+              { "key": "X-Signature", "value": "{{signature}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"{{eventId}}\",\n  \"type\": \"payment.confirmed\",\n  \"created_at\": \"{{createdAt}}\",\n  \"data\": {\n    \"payment_id\": \"{{paymentId}}\",\n    \"order_id\": \"{{orderId}}\",\n    \"amount\": 1,\n    \"currency\": \"{{currency}}\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{baseUrl}}/v1/webhooks/payments", "host": ["{{baseUrl}}"], "path": ["v1", "webhooks", "payments"] }
+          }
+        },
+        {
+          "name": "Tipo de evento desconhecido",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Evento aceito (202)', () => pm.response.to.have.status(202));"]
+              }
+            }
+          ],
+          "request": {
+            "description": "Tipo `customer.created`, que a aplicação não trata. É gravado e marcado IGNORED, sem erro.",
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Event-Id", "value": "{{eventId}}" },
+              { "key": "X-Timestamp", "value": "{{timestamp}}" },
+              { "key": "X-Signature", "value": "{{signature}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"{{eventId}}\",\n  \"type\": \"customer.created\",\n  \"created_at\": \"{{createdAt}}\",\n  \"data\": {\n    \"customer_id\": \"cus_001\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{baseUrl}}/v1/webhooks/payments", "host": ["{{baseUrl}}"], "path": ["v1", "webhooks", "payments"] }
+          }
+        },
+        {
+          "name": "Assinatura inválida (401)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Rejeitado (401)', () => pm.response.to.have.status(401));",
+                  "pm.test('Mensagem genérica', () => pm.expect(pm.response.json().message).to.eql('Invalid webhook signature'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "description": "O header `X-Signature` é fixo e inválido. A API responde 401 e nada é gravado na inbox.",
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Event-Id", "value": "{{eventId}}" },
+              { "key": "X-Timestamp", "value": "{{timestamp}}" },
+              { "key": "X-Signature", "value": "sha256=0000000000000000000000000000000000000000000000000000000000000000" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"{{eventId}}\",\n  \"type\": \"payment.confirmed\",\n  \"created_at\": \"{{createdAt}}\",\n  \"data\": {\n    \"payment_id\": \"{{paymentId}}\",\n    \"order_id\": \"{{orderId}}\",\n    \"amount\": {{amount}},\n    \"currency\": \"{{currency}}\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{baseUrl}}/v1/webhooks/payments", "host": ["{{baseUrl}}"], "path": ["v1", "webhooks", "payments"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Pedidos",
+      "item": [
+        {
+          "name": "Consultar pedido",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Pedido encontrado (200)', () => pm.response.to.have.status(200));"]
+              }
+            }
+          ],
+          "request": {
+            "description": "Estado do pedido e dos seus pagamentos, para acompanhar o efeito dos webhooks.",
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/v1/orders/{{orderId}}", "host": ["{{baseUrl}}"], "path": ["v1", "orders", "{{orderId}}"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Admin (local)",
+      "description": "Operação da inbox. Disponível somente com `webhook.admin.enabled=true` (profile `local`).",
+      "item": [
+        {
+          "name": "Listar eventos recentes",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Lista retornada (200)', () => pm.response.to.have.status(200));",
+                  "const events = pm.response.json();",
+                  "if (events.length > 0) {",
+                  "    pm.collectionVariables.set('webhookEventId', events[0].id);",
+                  "    console.log('webhookEventId = ' + events[0].id + ' (' + events[0].status + ')');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "description": "Eventos mais recentes da inbox. O id do primeiro fica salvo em `webhookEventId`.",
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/webhook-events?limit=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "webhook-events"],
+              "query": [{ "key": "limit", "value": "20" }]
+            }
+          }
+        },
+        {
+          "name": "Listar eventos DEAD",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Lista retornada (200)', () => pm.response.to.have.status(200));",
+                  "const events = pm.response.json();",
+                  "if (events.length > 0) {",
+                  "    pm.collectionVariables.set('webhookEventId', events[0].id);",
+                  "    console.log('webhookEventId = ' + events[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "description": "Eventos que esgotaram as tentativas ou tiveram erro permanente. O id do primeiro fica salvo em `webhookEventId`, pronto para **Reprocessar evento**.",
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/webhook-events?status=DEAD&limit=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "webhook-events"],
+              "query": [
+                { "key": "status", "value": "DEAD", "description": "RECEIVED, PROCESSING, PROCESSED, RETRY_SCHEDULED, DEAD ou IGNORED" },
+                { "key": "limit", "value": "50" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Consultar evento",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Evento encontrado (200)', () => pm.response.to.have.status(200));"]
+              }
+            }
+          ],
+          "request": {
+            "description": "Detalhe de um evento pelo id interno (`webhookEventId`).",
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/admin/webhook-events/{{webhookEventId}}", "host": ["{{baseUrl}}"], "path": ["admin", "webhook-events", "{{webhookEventId}}"] }
+          }
+        },
+        {
+          "name": "Reprocessar evento",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// 202 para evento DEAD; 422 se o evento não estiver DEAD.",
+                  "pm.test('Reprocessamento aceito (202)', () => pm.response.to.have.status(202));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "description": "Recoloca na fila um evento DEAD, com as tentativas zeradas. Use depois de corrigir a causa (ex.: criar o pagamento que faltava).",
+            "method": "POST",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/admin/webhook-events/{{webhookEventId}}/reprocess", "host": ["{{baseUrl}}"], "path": ["admin", "webhook-events", "{{webhookEventId}}", "reprocess"] }
+          }
+        },
+        {
+          "name": "Listar notificações (entregas à loja)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Lista retornada (200)', () => pm.response.to.have.status(200));"]
+              }
+            }
+          ],
+          "request": {
+            "description": "Outbox de notificações: mostra se o webhook de saída já chegou na loja (`SENT`), se está em retentativa (`RETRY_SCHEDULED`, com `attempts` e `nextAttemptAt`) ou se a plataforma desistiu (`DEAD`), com o último erro. Use junto com a collection **Cliente Webhook - Loja**.",
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/notifications?limit=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "notifications"],
+              "query": [{ "key": "limit", "value": "20" }]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Simulação (dev)",
+      "description": "Disponível somente com `webhook.dev.simulation-enabled=true` (profile `local`).",
+      "item": [
+        {
+          "name": "Criar pedido",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Pedido criado (201)', () => pm.response.to.have.status(201));",
+                  "const created = pm.response.json();",
+                  "pm.collectionVariables.set('orderId', created.orderId);",
+                  "pm.collectionVariables.set('paymentId', created.paymentId);",
+                  "pm.collectionVariables.set('amount', JSON.parse(pm.request.body.raw).amountInCents.toString());",
+                  "console.log('Webhooks agora apontam para ' + created.orderId + ' / ' + created.paymentId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "description": "Cria um pedido com pagamento pendente e atualiza `orderId`, `paymentId` e `amount`, para que os webhooks seguintes apontem para ele.",
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amountInCents\": 4990,\n  \"currency\": \"BRL\",\n  \"method\": \"PIX\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{baseUrl}}/dev/orders", "host": ["{{baseUrl}}"], "path": ["dev", "orders"] }
+          }
+        },
+        {
+          "name": "Simular evento pela aplicação",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Simulação executada (200)', () => pm.response.to.have.status(200));",
+                  "pm.test('Webhook aceito pelo endpoint real', () => pm.expect(pm.response.json().httpStatus).to.be.oneOf([200, 202]));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "description": "A própria aplicação monta, assina e envia o webhook para o endpoint real. Campos opcionais: `eventId` (repita para simular reentrega), `occurredAt` (instante antigo para fora de ordem) e `amountInCents` (valor divergente).",
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"orderId\": \"{{orderId}}\",\n  \"type\": \"payment.confirmed\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{baseUrl}}/dev/simulations/payment-events", "host": ["{{baseUrl}}"], "path": ["dev", "simulations", "payment-events"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Observabilidade",
+      "item": [
+        {
+          "name": "Health",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Aplicação UP', () => pm.expect(pm.response.json().status).to.eql('UP'));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/actuator/health", "host": ["{{baseUrl}}"], "path": ["actuator", "health"] }
+          }
+        },
+        {
+          "name": "Métricas (Prometheus)",
+          "request": {
+            "description": "Procure por `webhook_received_total`, `webhook_processed_total`, `webhook_failed_total` e `webhook_notification_sent_total`.",
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/actuator/prometheus", "host": ["{{baseUrl}}"], "path": ["actuator", "prometheus"] }
+          }
+        }
+      ]
+    }
+  ]
+}

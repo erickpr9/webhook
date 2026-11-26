@@ -1,0 +1,83 @@
+spring:
+  application:
+    name: webhook-study
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/webhook}
+    username: ${DB_USERNAME:webhook}
+    # Sem default fora do profile local: a aplicação não sobe sem a variável.
+    password: ${DB_PASSWORD}
+    hikari:
+      maximum-pool-size: 10
+  flyway:
+    locations: classpath:db/migration
+  jackson:
+    time-zone: UTC
+    default-property-inclusion: non_null
+  task:
+    scheduling:
+      pool:
+        size: 2
+      shutdown:
+        await-termination: true
+        await-termination-period: 30s
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+
+server:
+  shutdown: graceful
+  error:
+    include-stacktrace: never
+    include-message: never
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+
+webhook:
+  payment:
+    provider: payment-gateway
+    # Segredo HMAC compartilhado com o provedor. Obrigatório, mínimo de 32 caracteres.
+    secret: ${WEBHOOK_PAYMENT_SECRET}
+    tolerance: 300s
+    max-body-size: 64KB
+  worker:
+    events:
+      enabled: true
+      interval: 2s
+      batch-size: 20
+      lease: 2m
+      max-attempts: 6
+      backoff: 10s,30s,2m,10m,1h
+    notifications:
+      enabled: true
+      interval: 5s
+      batch-size: 50
+      lease: 1m
+      max-attempts: 5
+      backoff: 30s,2m,10m,1h
+  notification:
+    # URL da API do cliente que recebe o webhook de saída. Vazia: as notificações só vão para o log.
+    endpoint-url: ${WEBHOOK_NOTIFICATION_URL:}
+    # Segredo HMAC compartilhado com o cliente (mínimo de 32 caracteres quando há URL).
+    secret: ${WEBHOOK_NOTIFICATION_SECRET:}
+    connect-timeout: 2s
+    read-timeout: 5s
+  admin:
+    enabled: false
+  dev:
+    simulation-enabled: false
